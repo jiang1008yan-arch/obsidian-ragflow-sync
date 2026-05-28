@@ -1,0 +1,84 @@
+.ragflow-sync-view .ragflow-sync-toolbar {
+	display: flex;
+	gap: 8px;
+	flex-wrap: wrap;
+	margin-bottom: 12px;
+}
+
+.ragflow-sync-view .ragflow-sync-group {
+	margin-bottom: 16px;
+}
+
+.ragflow-sync-view .ragflow-sync-group-header {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	font-weight: var(--font-semibold);
+	margin-bottom: 4px;
+	padding-bottom: 2px;
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.ragflow-sync-view .ragflow-sync-item {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 8px;
+	padding: 2px 0;
+	font-size: var(--font-ui-small);
+}
+
+.ragflow-sync-view .ragflow-sync-item-path {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.ragflow-sync-view .ragflow-sync-badge {
+	flex-shrink: 0;
+	border-radius: 4px;
+	padding: 0 6px;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-on-accent);
+}
+
+.ragflow-sync-view .ragflow-sync-badge.new {
+	background-color: var(--color-green);
+}
+
+.ragflow-sync-view .ragflow-sync-badge.modified {
+	background-color: var(--color-yellow);
+	color: var(--text-normal);
+}
+
+.ragflow-sync-view .ragflow-sync-badge.deleted {
+	background-color: var(--color-red);
+}
+
+.ragflow-sync-view .ragflow-sync-badge.unchanged {
+	background-color: var(--background-modifier-border);
+	color: var(--text-muted);
+}
+
+.ragflow-sync-view .ragflow-sync-empty {
+	color: var(--text-muted);
+	font-style: italic;
+	margin-top: 8px;
+}
+
+.ragflow-sync-view .ragflow-sync-status {
+	margin-top: 8px;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.ragflow-mapping-row {
+	display: flex;
+	gap: 6px;
+	align-items: center;
+	margin-bottom: 6px;
+}
+
+.ragflow-mapping-row input {
+	flex: 1;
+}

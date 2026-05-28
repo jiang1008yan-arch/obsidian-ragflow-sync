@@ -1,0 +1,15 @@
+# intellij
+.idea
+
+# npm
+node_modules
+
+# build
+main.js
+*.js.map
+
+# obsidian plugin local data
+data.json
+
+# misc
+.DS_Store
