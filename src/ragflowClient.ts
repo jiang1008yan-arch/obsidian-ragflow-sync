@@ -2,7 +2,8 @@ import { requestUrl, RequestUrlParam } from "obsidian";
 import { buildMultipart } from "./multipart";
 import { RagflowFileNode, RagflowSyncSettings } from "./types";
 
-const PAGE_SIZE = 200;
+// RAGFlow's File API caps page_size at 100; larger values are rejected.
+const PAGE_SIZE = 100;
 
 export class RagflowClient {
 	private getSettings: () => RagflowSyncSettings;

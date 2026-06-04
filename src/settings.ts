@@ -8,6 +8,7 @@ export const DEFAULT_SETTINGS: RagflowSyncSettings = {
 	folderMappings: [],
 	extensions: ["md", "pdf", "docx"],
 	excludeGlobs: [".trash", ".obsidian"],
+	internalizeLinks: false,
 	state: { files: {} },
 };
 
@@ -99,6 +100,22 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 							.split(",")
 							.map((s) => s.trim())
 							.filter((s) => s.length > 0);
+						await this.plugin.saveSettings();
+					})
+			);
+
+		containerEl.createEl("h2", { text: "Link internalization" });
+
+		new Setting(containerEl)
+			.setName("Internalize Obsidian links")
+			.setDesc(
+				"When syncing Markdown, rewrite [[wikilinks]] and ![[embeds]] to plain text/standard Markdown and append a \"Related notes\" section listing outgoing links and backlinks. Your vault files are never modified."
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.internalizeLinks)
+					.onChange(async (value) => {
+						this.plugin.settings.internalizeLinks = value;
 						await this.plugin.saveSettings();
 					})
 			);
