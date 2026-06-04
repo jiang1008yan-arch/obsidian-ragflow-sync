@@ -1,6 +1,12 @@
 import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import type RagflowSyncPlugin from "./main";
+import { FolderInputSuggest } from "./folderSuggest";
 import { RagflowSyncSettings } from "./types";
+
+/** Strip leading/trailing slashes; "" means root/whole-vault. */
+function normalizeFolder(value: string): string {
+	return value.trim().replace(/^\/+|\/+$/g, "");
+}
 
 export const DEFAULT_SETTINGS: RagflowSyncSettings = {
 	ragflowBaseUrl: "http://127.0.0.1:9380",
@@ -14,15 +20,40 @@ export const DEFAULT_SETTINGS: RagflowSyncSettings = {
 
 export class RagflowSyncSettingTab extends PluginSettingTab {
 	plugin: RagflowSyncPlugin;
+	/** RAGFlow folder paths fetched for autocomplete; empty until loaded. */
+	private ragflowFolders: string[] = [];
 
 	constructor(app: App, plugin: RagflowSyncPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
 
+	/** Vault folders (plus "" for whole-vault) as picker candidates. */
+	private vaultFolders(): string[] {
+		const paths = this.app.vault
+			.getAllFolders(false)
+			.map((f) => f.path)
+			.sort((a, b) => a.localeCompare(b));
+		return ["", ...paths];
+	}
+
+	/** Lazily fetch RAGFlow folders for autocomplete; silent if not connected. */
+	private async loadRagflowFolders(): Promise<void> {
+		const { ragflowBaseUrl, apiKey } = this.plugin.settings;
+		if (!ragflowBaseUrl || !apiKey) return;
+		try {
+			this.ragflowFolders = ["", ...(await this.plugin.client.listAllFolderPaths())];
+		} catch (_e) {
+			// No connection / bad key: leave suggestions empty, manual typing works.
+		}
+	}
+
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
+		// Populate RAGFlow folder suggestions in the background; the pickers read
+		// this.ragflowFolders fresh on each keystroke, so no re-render is needed.
+		void this.loadRagflowFolders();
 
 		containerEl.createEl("h2", { text: "RAGFlow connection" });
 
@@ -122,7 +153,7 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 
 		containerEl.createEl("h2", { text: "Folder mappings" });
 		containerEl.createEl("p", {
-			text: "Map a vault folder to a target folder inside RAGFlow File Management. Subfolders are mirrored recursively.",
+			text: "Map a vault folder to a target folder inside RAGFlow File Management. Subfolders are mirrored recursively. Click a field to pick from existing folders (RAGFlow folders load after a successful Test connection); you can also type a new RAGFlow path and it will be created on sync.",
 			cls: "setting-item-description",
 		});
 
@@ -160,10 +191,17 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 			const vaultInput = row.createEl("input", { type: "text" });
 			vaultInput.placeholder = "Vault folder (e.g. Notes/Research)";
 			vaultInput.value = mapping.vaultPath;
-			vaultInput.addEventListener("change", async () => {
-				mapping.vaultPath = vaultInput.value.trim().replace(/^\/+|\/+$/g, "");
+			const setVaultPath = async (value: string) => {
+				mapping.vaultPath = normalizeFolder(value);
 				await this.plugin.saveSettings();
-			});
+			};
+			vaultInput.addEventListener("change", () => setVaultPath(vaultInput.value));
+			new FolderInputSuggest(
+				this.app,
+				vaultInput,
+				() => this.vaultFolders(),
+				(value) => void setVaultPath(value)
+			);
 
 			const arrow = row.createSpan({ text: "→" });
 			arrow.style.flex = "0 0 auto";
@@ -171,10 +209,17 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 			const ragInput = row.createEl("input", { type: "text" });
 			ragInput.placeholder = "RAGFlow folder (e.g. ObsidianVault/Research)";
 			ragInput.value = mapping.ragflowBaseFolder;
-			ragInput.addEventListener("change", async () => {
-				mapping.ragflowBaseFolder = ragInput.value.trim().replace(/^\/+|\/+$/g, "");
+			const setRagPath = async (value: string) => {
+				mapping.ragflowBaseFolder = normalizeFolder(value);
 				await this.plugin.saveSettings();
-			});
+			};
+			ragInput.addEventListener("change", () => setRagPath(ragInput.value));
+			new FolderInputSuggest(
+				this.app,
+				ragInput,
+				() => this.ragflowFolders,
+				(value) => void setRagPath(value)
+			);
 
 			const removeBtn = row.createEl("button", { text: "✕" });
 			removeBtn.style.flex = "0 0 auto";
