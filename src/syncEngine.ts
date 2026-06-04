@@ -4,12 +4,14 @@ import { SyncStateStore } from "./syncState";
 import { sha256 } from "./hash";
 import { assembleChanges, classifyByStat, finalizeWithHashes } from "./diff";
 import { placement } from "./mapping";
+import { internalizeMarkdown, noteTitle } from "./internalize";
 import {
 	ChangeKind,
 	DiffResult,
 	FileChange,
 	FolderMapping,
 	RagflowSyncSettings,
+	RelatedLinks,
 	ScopeConfig,
 	SyncedFileRecord,
 	VaultEntry,
@@ -186,11 +188,19 @@ export class SyncEngine {
 			}
 		}
 
+		// Change detection always hashes the raw source above; link
+		// internalization only rewrites the bytes we hand to RAGFlow.
+		const uploadBytes =
+			this.getSettings().internalizeLinks &&
+			file.extension.toLowerCase() === "md"
+				? this.internalizeBytes(bytes, file.path)
+				: bytes;
+
 		const contentType = CONTENT_TYPES[file.extension.toLowerCase()];
 		const node = await this.client.uploadFile(
 			parentId,
 			file.name,
-			bytes,
+			uploadBytes,
 			contentType
 		);
 
@@ -202,6 +212,35 @@ export class SyncEngine {
 			mtime: file.stat.mtime,
 			lastSyncedAt: Date.now(),
 		});
+	}
+
+	/** Decode Markdown bytes, internalize its links, and re-encode as UTF-8. */
+	private internalizeBytes(bytes: ArrayBuffer, path: string): ArrayBuffer {
+		const text = new TextDecoder().decode(bytes);
+		const transformed = internalizeMarkdown(text, this.relatedLinks(path));
+		return new TextEncoder().encode(transformed).buffer;
+	}
+
+	/**
+	 * Outgoing links and backlinks for a note, as titles, from Obsidian's
+	 * resolved-link graph. Only note-to-note (.md) relationships are listed;
+	 * attachments and unresolved links are ignored.
+	 */
+	private relatedLinks(path: string): RelatedLinks {
+		const resolved = this.app.metadataCache.resolvedLinks ?? {};
+		const isNote = (p: string) => p.toLowerCase().endsWith(".md");
+
+		const outgoing = Object.keys(resolved[path] ?? {})
+			.filter((target) => target !== path && isNote(target))
+			.map(noteTitle);
+
+		const incoming: string[] = [];
+		for (const [source, targets] of Object.entries(resolved)) {
+			if (source !== path && isNote(source) && targets[path]) {
+				incoming.push(noteTitle(source));
+			}
+		}
+		return { outgoing, incoming };
 	}
 }
 

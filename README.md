@@ -12,6 +12,9 @@ can see which files are new, modified, deleted, or already up to date.
 - Scan differences before uploading or deleting anything.
 - Sync all changes, or sync one change group at a time.
 - Track local file hashes to avoid re-uploading unchanged content.
+- Optionally internalize Obsidian double links: rewrite `[[wikilinks]]` and
+  `![[embeds]]` to plain text/standard Markdown and append a related-notes
+  section (outgoing links and backlinks) so the link graph survives in RAGFlow.
 
 ## Requirements
 
@@ -93,6 +96,26 @@ File Management folder.
   ```text
   .trash,.obsidian
   ```
+
+### Link Internalization
+
+RAGFlow does not understand Obsidian's `[[wikilink]]` syntax, so by default the
+links upload as raw `[[...]]` text. Turn on `Internalize Obsidian links` to make
+synced Markdown self-describing:
+
+- `[[Note]]` becomes its note title; `[[Note|alias]]` becomes the alias.
+- `[[Note#Heading]]` becomes `Note > Heading`.
+- `![[image.png]]` becomes a standard Markdown image; non-image embeds collapse
+  to the note title.
+- A `## Related notes` section is appended listing the note's outgoing
+  `**Links:**` and incoming `**Backlinks:**` (other notes that link to it).
+
+Your vault files are never modified — the rewrite happens only on the copy sent
+to RAGFlow. Backlinks are resolved from Obsidian's link graph at sync time.
+
+Note: change detection hashes the original file, so editing a note re-syncs it,
+but a change to a *different* note's backlinks does not by itself mark this note
+as modified. Re-sync that note (or sync all) to refresh its related section.
 
 ### Folder Mappings
 

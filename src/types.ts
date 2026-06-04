@@ -13,6 +13,12 @@ export interface RagflowSyncSettings {
 	extensions: string[];
 	/** Glob-ish path fragments to exclude (substring match on vault path). */
 	excludeGlobs: string[];
+	/**
+	 * When true, Markdown uploads have their [[wikilinks]]/![[embeds]] rewritten
+	 * to plain text/standard Markdown and a "Related notes" section appended. The
+	 * vault files themselves are never modified.
+	 */
+	internalizeLinks: boolean;
 	/** Persisted local sync state. */
 	state: SyncState;
 }
@@ -96,6 +102,14 @@ export interface HashClassification {
 	modified: FileChange[];
 	unchanged: FileChange[];
 	touches: TouchRefresh[];
+}
+
+/** Outgoing wikilink targets and incoming backlinks for a note, as titles. */
+export interface RelatedLinks {
+	/** Titles of notes this note links to. */
+	outgoing: string[];
+	/** Titles of notes that link to this note. */
+	incoming: string[];
 }
 
 /** A node returned by the RAGFlow File API list endpoint. */
