@@ -126,6 +126,11 @@ Each mapping has two fields:
 - `Vault folder`: a folder path inside your Obsidian vault.
 - `RAGFlow folder`: the destination folder path inside RAGFlow File Management.
 
+Both fields autocomplete: click one to pick from existing folders. Vault folders
+come from your vault; RAGFlow folders are fetched after a successful
+`Test connection` (open settings again if you just connected). You can still
+type a RAGFlow path that does not exist yet — it is created on the next sync.
+
 Example:
 
 ```text

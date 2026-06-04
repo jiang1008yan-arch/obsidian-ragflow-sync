@@ -78,6 +78,27 @@ export class RagflowClient {
 	}
 
 	/**
+	 * Every folder under root as a "/"-joined relative path (e.g. "A/B/C"),
+	 * sorted, for the settings folder picker. Walks the tree depth-first reusing
+	 * the per-run listing cache. Excludes the root itself.
+	 */
+	async listAllFolderPaths(): Promise<string[]> {
+		const rootId = await this.ensureRootId();
+		const paths: string[] = [];
+		const walk = async (parentId: string, prefix: string): Promise<void> => {
+			const children = await this.listFolder(parentId);
+			for (const child of children) {
+				if (child.type !== "folder") continue;
+				const path = prefix ? `${prefix}/${child.name}` : child.name;
+				paths.push(path);
+				await walk(child.id, path);
+			}
+		};
+		await walk(rootId, "");
+		return paths.sort((a, b) => a.localeCompare(b));
+	}
+
+	/**
 	 * List all children of a folder, paginating fully. parentId omitted => root.
 	 * Memoized for the client's lifetime; invalidated by this client's own
 	 * writes (createFolder/uploadFile/deleteFiles/move). Internal: callers use
