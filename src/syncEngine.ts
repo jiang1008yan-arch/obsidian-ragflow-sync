@@ -1,15 +1,15 @@
-import { App, TFile } from "obsidian";
+import { App, parseYaml, TFile } from "obsidian";
 import { RagflowClient } from "./ragflowClient";
 import { SyncStateStore } from "./syncState";
 import { sha256 } from "./hash";
 import { assembleChanges, classifyByStat, finalizeWithHashes } from "./diff";
-import { placement } from "./mapping";
 import { internalizeMarkdown, noteTitle } from "./internalize";
+import { normalizeMeta, splitFrontmatter } from "./frontmatter";
 import {
 	ChangeKind,
+	DatasetMapping,
 	DiffResult,
 	FileChange,
-	FolderMapping,
 	RagflowSyncSettings,
 	RelatedLinks,
 	ScopeConfig,
@@ -66,7 +66,7 @@ export class SyncEngine {
 	private scope(): ScopeConfig {
 		const s = this.getSettings();
 		return {
-			mappings: s.folderMappings,
+			mappings: s.datasetMappings,
 			extensions: s.extensions,
 			excludeGlobs: s.excludeGlobs,
 		};
@@ -86,8 +86,8 @@ export class SyncEngine {
 		return sha256(bytes);
 	}
 
-	private missingMappings(): FolderMapping[] {
-		return this.getSettings().folderMappings.filter(
+	private missingMappings(): DatasetMapping[] {
+		return this.getSettings().datasetMappings.filter(
 			(m) =>
 				m.vaultPath.length > 0 &&
 				this.app.vault.getAbstractFileByPath(m.vaultPath) === null
@@ -127,13 +127,11 @@ export class SyncEngine {
 		};
 	}
 
-	private async parentFolderId(change: FileChange): Promise<string> {
+	private async datasetIdFor(change: FileChange): Promise<string> {
 		if (!change.mapping) {
 			throw new Error("Cannot place a file without an owning mapping.");
 		}
-		return this.client.ensureFolderPath(
-			placement(change.mapping, change.vaultPath)
-		);
+		return this.client.ensureDatasetId(change.mapping.datasetName);
 	}
 
 	async applyChanges(
@@ -152,7 +150,9 @@ export class SyncEngine {
 					await this.syncUpload(change, change.record);
 				} else if (change.kind === "deleted") {
 					if (change.record) {
-						await this.client.deleteFiles([change.record.fileId]);
+						await this.client.deleteDocuments(change.record.datasetId, [
+							change.record.documentId,
+						]);
 					}
 					await this.store.deleteFile(change.vaultPath);
 				}
@@ -177,36 +177,51 @@ export class SyncEngine {
 		}
 		const bytes = await this.app.vault.adapter.readBinary(file.path);
 		const hash = change.hash ?? (await sha256(bytes));
-		const parentId = await this.parentFolderId(change);
+		const datasetId = await this.datasetIdFor(change);
 
 		if (oldRecord) {
 			// RAGFlow has no in-place replace: delete then re-upload.
 			try {
-				await this.client.deleteFiles([oldRecord.fileId]);
+				await this.client.deleteDocuments(oldRecord.datasetId, [
+					oldRecord.documentId,
+				]);
 			} catch (_e) {
-				// Old file may already be gone; continue with upload.
+				// Old document may already be gone; continue with upload.
 			}
 		}
 
-		// Change detection always hashes the raw source above; link
-		// internalization only rewrites the bytes we hand to RAGFlow.
-		const uploadBytes =
-			this.getSettings().internalizeLinks &&
+		// Change detection always hashes the raw source above; the Markdown
+		// transform (frontmatter strip + optional link internalization) only
+		// rewrites the bytes we hand to RAGFlow — the vault file is untouched.
+		const { uploadBytes, meta } =
 			file.extension.toLowerCase() === "md"
-				? this.internalizeBytes(bytes, file.path)
-				: bytes;
+				? this.prepareMarkdown(bytes, file.path)
+				: { uploadBytes: bytes, meta: {} };
 
 		const contentType = CONTENT_TYPES[file.extension.toLowerCase()];
-		const node = await this.client.uploadFile(
-			parentId,
+		const doc = await this.client.uploadDocument(
+			datasetId,
 			file.name,
 			uploadBytes,
 			contentType
 		);
 
+		// Set the note's frontmatter as RAGFlow document metadata. Best-effort:
+		// a metadata failure should not undo a successful upload.
+		if (Object.keys(meta).length > 0) {
+			try {
+				await this.client.setDocumentMetadata(datasetId, doc.id, meta);
+			} catch (e) {
+				console.error(
+					`RAGFlow Sync: failed to set metadata for ${change.vaultPath}:`,
+					e
+				);
+			}
+		}
+
 		await this.store.setFile(change.vaultPath, {
-			fileId: node.id,
-			parentFolderId: parentId,
+			documentId: doc.id,
+			datasetId,
 			hash,
 			size: file.stat.size,
 			mtime: file.stat.mtime,
@@ -214,11 +229,35 @@ export class SyncEngine {
 		});
 	}
 
-	/** Decode Markdown bytes, internalize its links, and re-encode as UTF-8. */
-	private internalizeBytes(bytes: ArrayBuffer, path: string): ArrayBuffer {
+	/**
+	 * Decode a Markdown file, strip its YAML frontmatter (parsed out as metadata),
+	 * optionally internalize its links, and re-encode the body as UTF-8. The
+	 * frontmatter becomes the document's RAGFlow metadata rather than living in
+	 * the uploaded text.
+	 */
+	private prepareMarkdown(
+		bytes: ArrayBuffer,
+		path: string
+	): { uploadBytes: ArrayBuffer; meta: Record<string, unknown> } {
 		const text = new TextDecoder().decode(bytes);
-		const transformed = internalizeMarkdown(text, this.relatedLinks(path));
-		return new TextEncoder().encode(transformed).buffer;
+		const { yaml, body } = splitFrontmatter(text);
+
+		let meta: Record<string, unknown> = {};
+		if (yaml !== null) {
+			try {
+				meta = normalizeMeta(parseYaml(yaml));
+			} catch (e) {
+				console.error(`RAGFlow Sync: invalid frontmatter in ${path}:`, e);
+			}
+		}
+
+		const transformed = this.getSettings().internalizeLinks
+			? internalizeMarkdown(body, this.relatedLinks(path))
+			: body;
+		return {
+			uploadBytes: new TextEncoder().encode(transformed).buffer,
+			meta,
+		};
 	}
 
 	/**

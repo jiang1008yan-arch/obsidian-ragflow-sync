@@ -1,10 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { extensionOf, isInScope, owningMapping, placement } from "./mapping";
-import { FolderMapping, ScopeConfig } from "./types";
+import { extensionOf, isInScope, owningMapping } from "./mapping";
+import { DatasetMapping, ScopeConfig } from "./types";
 
-const mapping = (vaultPath: string, ragflowBaseFolder = "rf"): FolderMapping => ({
+const mapping = (vaultPath: string, datasetName = "ds"): DatasetMapping => ({
 	vaultPath,
-	ragflowBaseFolder,
+	datasetName,
 });
 
 function scope(over: Partial<ScopeConfig> = {}): ScopeConfig {
@@ -45,29 +45,8 @@ describe("isInScope", () => {
 		expect(isInScope("Notes/.trash/a.md", scope())).toBeUndefined();
 		expect(isInScope("Notes/a.md", scope())?.vaultPath).toBe("Notes");
 	});
-});
-
-describe("placement", () => {
-	it("appends the file's sub-folders to the base folder", () => {
-		expect(placement(mapping("Notes", "rf/X"), "Notes/Sub/a.md")).toEqual([
-			"rf",
-			"X",
-			"Sub",
-		]);
-	});
-	it("is just the base folder for a file directly under the mapping", () => {
-		expect(placement(mapping("Notes", "rf"), "Notes/a.md")).toEqual(["rf"]);
-	});
-	it("handles a whole-vault mapping (empty vaultPath)", () => {
-		expect(placement(mapping("", "rf"), "Sub/a.md")).toEqual(["rf", "Sub"]);
-	});
-	it("handles an empty base folder", () => {
-		expect(placement(mapping("Notes", ""), "Notes/Sub/a.md")).toEqual(["Sub"]);
-	});
-	it("preserves unicode and spaces in folder names", () => {
-		expect(placement(mapping("笔记", "知识库"), "笔记/项目 A/a.md")).toEqual([
-			"知识库",
-			"项目 A",
-		]);
+	it("returns the owning mapping's target dataset", () => {
+		const s = scope({ mappings: [mapping("Notes", "Research")] });
+		expect(isInScope("Notes/a.md", s)?.datasetName).toBe("Research");
 	});
 });

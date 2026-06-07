@@ -1,14 +1,21 @@
 # RAGFlow Sync for Obsidian
 
-Sync selected Obsidian vault folders to RAGFlow File Management while preserving
-the folder structure. The plugin scans for differences before syncing, so you
-can see which files are new, modified, deleted, or already up to date.
+Sync selected Obsidian vault folders directly into RAGFlow **datasets**
+(knowledge bases). The plugin scans for differences before syncing, so you can
+see which files are new, modified, deleted, or already up to date.
+
+When a Markdown note is synced, its YAML frontmatter is stripped from the
+uploaded document and set as the document's RAGFlow **metadata** instead — so
+your tags, titles, and other properties become queryable metadata in RAGFlow
+rather than noise in the document body. Your vault note is never modified.
 
 ## Features
 
-- Sync Markdown, PDF, Word, PowerPoint, Excel, text, and image files.
-- Map one or more Obsidian folders to target folders in RAGFlow.
-- Mirror subfolders recursively under each mapped folder.
+- Upload Markdown, PDF, Word, PowerPoint, Excel, text, and image files straight
+  into RAGFlow datasets (no File Management folder hops).
+- Map one or more Obsidian folders to target RAGFlow datasets.
+- Strip each note's frontmatter on upload and set it as document metadata via
+  the RAGFlow metadata API; the original note stays unchanged.
 - Scan differences before uploading or deleting anything.
 - Sync all changes, or sync one change group at a time.
 - Track local file hashes to avoid re-uploading unchanged content.
@@ -20,7 +27,7 @@ can see which files are new, modified, deleted, or already up to date.
 
 - Obsidian desktop app 1.4.0 or newer.
 - A running RAGFlow instance.
-- A RAGFlow API key that can access File Management.
+- A RAGFlow API key that can access the Dataset API.
 
 This plugin is desktop-only because it uses Obsidian desktop APIs for local file
 access and network requests.
@@ -69,8 +76,8 @@ Open `Settings -> RAGFlow Sync`.
 
 - `API key`: your RAGFlow API key. The plugin sends it as a Bearer token.
 
-Click `Test` to verify that Obsidian can connect to RAGFlow and list the root
-File Management folder.
+Click `Test` to verify that Obsidian can connect to RAGFlow and list its
+datasets.
 
 ### Sync Scope
 
@@ -117,40 +124,54 @@ Note: change detection hashes the original file, so editing a note re-syncs it,
 but a change to a *different* note's backlinks does not by itself mark this note
 as modified. Re-sync that note (or sync all) to refresh its related section.
 
-### Folder Mappings
+### Dataset Mappings
 
-Folder mappings decide what gets synced and where it appears in RAGFlow.
+Dataset mappings decide what gets synced and which RAGFlow dataset it lands in.
 
 Each mapping has two fields:
 
 - `Vault folder`: a folder path inside your Obsidian vault.
-- `RAGFlow folder`: the destination folder path inside RAGFlow File Management.
+- `RAGFlow dataset`: the name of the destination RAGFlow dataset (knowledge
+  base).
 
-Both fields autocomplete: click one to pick from existing folders. Vault folders
-come from your vault; RAGFlow folders are fetched after a successful
+Both fields autocomplete: click one to pick from existing entries. Vault folders
+come from your vault; RAGFlow datasets are fetched after a successful
 `Test connection` (open settings again if you just connected). You can still
-type a RAGFlow path that does not exist yet — it is created on the next sync.
+type a dataset name that does not exist yet — it is created on the next sync.
 
 Example:
 
 ```text
-Vault folder: Notes/Research
-RAGFlow folder: ObsidianVault/Research
+Vault folder:    Notes/Research
+RAGFlow dataset: Research
 ```
 
-With this mapping, a local file:
+With this mapping, every in-scope file under `Notes/Research` (including its
+subfolders) is uploaded as a document into the `Research` dataset. Datasets are
+flat, so subfolders are not mirrored — all matching notes become documents in
+the same dataset. The plugin creates the dataset automatically if it does not
+exist yet.
 
-```text
-Notes/Research/Papers/llm-notes.md
+### Frontmatter As Metadata
+
+For Markdown notes, the leading YAML frontmatter block is parsed and removed
+before upload, then written to the document's RAGFlow metadata via the
+update-document API once the upload completes. For example, a note starting
+with:
+
+```yaml
+---
+title: LLM Notes
+tags: [ai, research]
+status: draft
+---
 ```
 
-is synced to RAGFlow as:
-
-```text
-ObsidianVault/Research/Papers/llm-notes.md
-```
-
-The plugin creates missing RAGFlow folders automatically.
+uploads with that block removed from the body, and the document gets RAGFlow
+metadata `{ "title": "LLM Notes", "tags": ["ai", "research"], "status":
+"draft" }`. The note in your vault is left exactly as-is. Editing the
+frontmatter changes the file's content hash, so the note re-syncs and its
+metadata is refreshed on the next sync.
 
 ## Use The Plugin
 
@@ -181,24 +202,31 @@ There are three ways to open or run sync actions:
 
 ## How Sync Works
 
-- New files are uploaded to the mapped RAGFlow folder.
-- Modified files are replaced by deleting the old RAGFlow file and uploading the
-  new version.
-- Deleted local files remove the previously synced RAGFlow file.
+- New files are uploaded as documents into the mapped RAGFlow dataset. For
+  Markdown, frontmatter is stripped and set as the document's metadata.
+- Modified files are replaced by deleting the old document and uploading the new
+  version (RAGFlow has no in-place replace), then re-applying metadata.
+- Deleted local files remove the previously synced document from its dataset.
 - Unchanged files are skipped.
 
+Uploaded documents are not parsed/chunked automatically — trigger parsing in the
+RAGFlow UI (or via its API) when you are ready.
+
 The plugin stores sync metadata in Obsidian plugin data. This state is used to
-detect changes quickly and to know which remote RAGFlow file should be deleted
-or replaced.
+detect changes quickly and to know which dataset document should be deleted or
+replaced.
 
 ## Important Notes
 
 - Sync is manual. The plugin does not currently auto-sync on file save.
-- Only files under configured folder mappings are considered.
+- Only files under configured dataset mappings are considered.
 - If a mapped vault folder does not exist, the scan shows a notice and skips it.
 - If you move or rename a local file, it may be detected as one deleted file and
   one new file.
 - For modified files, RAGFlow replacement is implemented as delete then upload.
+- Because datasets are flat, two notes with the same filename mapped to the same
+  dataset become same-named documents; give them distinct names or map them to
+  different datasets if that matters to you.
 - Keep your API key private. Do not commit Obsidian plugin data files containing
   local settings or secrets.
 

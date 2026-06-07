@@ -3,7 +3,7 @@
 	"name": "RAGFlow Sync",
 	"version": "0.1.0",
 	"minAppVersion": "1.4.0",
-	"description": "Sync your vault files (Markdown, PDF, Word, ...) to RAGFlow File Management, preserving folder structure, with diff detection before syncing.",
+	"description": "Sync your vault files (Markdown, PDF, Word, ...) into RAGFlow datasets, setting note frontmatter as document metadata, with diff detection before syncing.",
 	"author": "jiang1008yan",
 	"isDesktopOnly": true
 }

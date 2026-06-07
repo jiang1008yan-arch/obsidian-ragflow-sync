@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { assembleChanges, classifyByStat, finalizeWithHashes } from "./diff";
 import {
-	FolderMapping,
+	DatasetMapping,
 	ScopeConfig,
 	SyncedFileRecord,
 	SyncState,
@@ -16,8 +16,8 @@ function entry(path: string, size = 10, mtime = 100): VaultEntry {
 
 function record(over: Partial<SyncedFileRecord> = {}): SyncedFileRecord {
 	return {
-		fileId: "f1",
-		parentFolderId: "p1",
+		documentId: "d1",
+		datasetId: "ds1",
 		hash: "h1",
 		size: 10,
 		mtime: 100,
@@ -30,9 +30,9 @@ function state(files: Record<string, SyncedFileRecord>): SyncState {
 	return { files };
 }
 
-const mapping = (vaultPath: string, ragflowBaseFolder = "rf"): FolderMapping => ({
+const mapping = (vaultPath: string, datasetName = "ds"): DatasetMapping => ({
 	vaultPath,
-	ragflowBaseFolder,
+	datasetName,
 });
 
 function scope(over: Partial<ScopeConfig> = {}): ScopeConfig {

@@ -1,14 +1,14 @@
-export interface FolderMapping {
+export interface DatasetMapping {
 	/** Vault folder path (relative to vault root, no leading slash). */
 	vaultPath: string;
-	/** Target folder path inside RAGFlow File Management (under root). */
-	ragflowBaseFolder: string;
+	/** Target RAGFlow dataset (knowledge base) name; created on sync if missing. */
+	datasetName: string;
 }
 
 export interface RagflowSyncSettings {
 	ragflowBaseUrl: string;
 	apiKey: string;
-	folderMappings: FolderMapping[];
+	datasetMappings: DatasetMapping[];
 	/** Allowed file extensions without dot, lowercase. */
 	extensions: string[];
 	/** Glob-ish path fragments to exclude (substring match on vault path). */
@@ -24,8 +24,10 @@ export interface RagflowSyncSettings {
 }
 
 export interface SyncedFileRecord {
-	fileId: string;
-	parentFolderId: string;
+	/** RAGFlow document id within the owning dataset. */
+	documentId: string;
+	/** RAGFlow dataset (knowledge base) id the document lives in. */
+	datasetId: string;
 	hash: string;
 	size: number;
 	mtime: number;
@@ -44,7 +46,7 @@ export interface FileChange {
 	/** Vault path (for deleted, this is the path that no longer exists). */
 	vaultPath: string;
 	/** Owning mapping; absent for deletions whose mapping was removed. */
-	mapping?: FolderMapping;
+	mapping?: DatasetMapping;
 	/** Existing record (present for modified/deleted/unchanged). */
 	record?: SyncedFileRecord;
 	/** Freshly computed content hash (present for modified/unchanged-by-hash). */
@@ -56,7 +58,7 @@ export interface FileChange {
 export interface DiffResult {
 	changes: FileChange[];
 	/** Mappings whose vaultPath does not exist in the vault. */
-	missingMappings: FolderMapping[];
+	missingMappings: DatasetMapping[];
 }
 
 /** An unfiltered point-in-time entry from the vault snapshot. */
@@ -68,7 +70,7 @@ export interface VaultEntry {
 
 /** Everything the Diff needs to decide what is in-scope and who owns it. */
 export interface ScopeConfig {
-	mappings: FolderMapping[];
+	mappings: DatasetMapping[];
 	/** Lowercase extensions without dots. */
 	extensions: string[];
 	excludeGlobs: string[];
@@ -78,15 +80,15 @@ export interface ScopeConfig {
 export interface PendingHash {
 	entry: VaultEntry;
 	record: SyncedFileRecord;
-	mapping: FolderMapping;
+	mapping: DatasetMapping;
 }
 
 /** Phase-1 (stat-only) classification of a snapshot against synced state. */
 export interface StatClassification {
-	news: { entry: VaultEntry; mapping: FolderMapping }[];
-	unchanged: { entry: VaultEntry; record: SyncedFileRecord; mapping: FolderMapping }[];
+	news: { entry: VaultEntry; mapping: DatasetMapping }[];
+	unchanged: { entry: VaultEntry; record: SyncedFileRecord; mapping: DatasetMapping }[];
 	needHash: PendingHash[];
-	deletions: { vaultPath: string; record: SyncedFileRecord; mapping?: FolderMapping }[];
+	deletions: { vaultPath: string; record: SyncedFileRecord; mapping?: DatasetMapping }[];
 }
 
 /** A synced-state record whose stats drifted but whose content is unchanged. */
@@ -112,13 +114,23 @@ export interface RelatedLinks {
 	incoming: string[];
 }
 
-/** A node returned by the RAGFlow File API list endpoint. */
-export interface RagflowFileNode {
+/** A dataset (knowledge base) as returned by the RAGFlow Dataset API. */
+export interface RagflowDataset {
 	id: string;
 	name: string;
-	type: string; // "folder" | "pdf" | "doc" | "visual" | ...
-	size?: number;
+	document_count?: number;
 	create_time?: number;
 	update_time?: number;
-	parent_id?: string;
+}
+
+/** A document inside a dataset as returned by the RAGFlow Document API. */
+export interface RagflowDocument {
+	id: string;
+	name: string;
+	dataset_id?: string;
+	size?: number;
+	type?: string;
+	run?: string;
+	create_time?: number;
+	update_time?: number;
 }

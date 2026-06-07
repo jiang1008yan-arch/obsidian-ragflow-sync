@@ -95,6 +95,35 @@ export default class RagflowSyncPlugin extends Plugin {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
 		// Ensure nested state object exists and is well-formed.
 		this.settings.state = Object.assign({ files: {} }, data.state ?? {});
+		this.migrateLegacyData(data);
+	}
+
+	/**
+	 * Migrate data.json written by the File-Management era of the plugin:
+	 * `folderMappings` (vault folder -> RAGFlow folder path) become
+	 * `datasetMappings` (vault folder -> dataset name), and any synced records
+	 * still keyed to File-Management files are dropped so everything re-syncs
+	 * into datasets on the next run.
+	 */
+	private migrateLegacyData(data: Record<string, unknown>): void {
+		const legacyMappings = data.folderMappings as
+			| { vaultPath?: string; ragflowBaseFolder?: string }[]
+			| undefined;
+		if (legacyMappings && this.settings.datasetMappings.length === 0) {
+			this.settings.datasetMappings = legacyMappings.map((m) => ({
+				vaultPath: m.vaultPath ?? "",
+				datasetName: m.ragflowBaseFolder ?? "",
+			}));
+		}
+		delete (this.settings as unknown as Record<string, unknown>).folderMappings;
+
+		const files = this.settings.state.files;
+		const isLegacyRecord = Object.values(files).some(
+			(r) => (r as { documentId?: string }).documentId === undefined
+		);
+		if (isLegacyRecord) {
+			this.settings.state.files = {};
+		}
 	}
 
 	async saveSettings(): Promise<void> {
