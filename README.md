@@ -32,6 +32,33 @@ rather than noise in the document body. Your vault note is never modified.
 This plugin is desktop-only because it uses Obsidian desktop APIs for local file
 access and network requests.
 
+## Install (No Build Required)
+
+Obsidian only needs three files in the plugin folder: `manifest.json`,
+`main.js`, and `styles.css`. A prebuilt `main.js` is committed in this
+repository, so you do not need Node.js or a build step.
+
+1. Create the plugin folder in your vault:
+
+   ```text
+   <your-vault>/.obsidian/plugins/obsidian-ragflow-sync/
+   ```
+
+2. Copy these three files from this repository into that folder:
+
+   - `manifest.json`
+   - `main.js`
+   - `styles.css`
+
+3. Restart Obsidian (or reload it).
+
+4. Open `Settings -> Community plugins`, turn off Safe mode if needed, then
+   enable `RAGFlow Sync`.
+
+> If Obsidian shows "Failed to load plugin", the most common cause is a
+> missing `main.js` in the plugin folder — make sure all three files above
+> are present and that the folder name matches the `id` in `manifest.json`.
+
 ## Install From Source
 
 1. Open your vault's plugin folder:

@@ -5,7 +5,7 @@
 node_modules
 
 # build
-main.js
+# main.js is committed so the plugin can be installed without a local build.
 *.js.map
 
 # obsidian plugin local data
