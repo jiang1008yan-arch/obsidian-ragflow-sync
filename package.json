@@ -1,7 +1,7 @@
 {
 	"name": "obsidian-ragflow-sync",
 	"version": "0.1.0",
-	"description": "Sync Obsidian vault files to RAGFlow File Management with folder structure and diff detection.",
+	"description": "Sync Obsidian vault files into RAGFlow datasets with frontmatter-as-metadata and diff detection.",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",

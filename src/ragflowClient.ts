@@ -1,15 +1,16 @@
 import { requestUrl, RequestUrlParam } from "obsidian";
 import { buildMultipart } from "./multipart";
-import { RagflowFileNode, RagflowSyncSettings } from "./types";
+import { RagflowDataset, RagflowDocument, RagflowSyncSettings } from "./types";
 
-// RAGFlow's File API caps page_size at 100; larger values are rejected.
+// RAGFlow's list endpoints cap page_size; 100 is safe across datasets/documents.
 const PAGE_SIZE = 100;
 
 export class RagflowClient {
 	private getSettings: () => RagflowSyncSettings;
-	private rootId: string | null = null;
-	/** parentId -> children listing, cached within a sync run. */
-	private childrenCache: Map<string, RagflowFileNode[]> = new Map();
+	/** All datasets, listed once per client lifetime. */
+	private datasetsCache: RagflowDataset[] | null = null;
+	/** dataset name -> id, resolved/created within a sync run. */
+	private datasetIdByName: Map<string, string> = new Map();
 
 	constructor(getSettings: () => RagflowSyncSettings) {
 		this.getSettings = getSettings;
@@ -54,180 +55,140 @@ export class RagflowClient {
 		return parts.length ? `?${parts.join("&")}` : "";
 	}
 
-	/** Resolve and cache the tenant root folder id. */
-	async getRoot(): Promise<{ rootId: string; children: RagflowFileNode[] }> {
-		const data = await this.send<{
-			files: RagflowFileNode[];
-			parent_folder: RagflowFileNode;
-		}>({
-			url: `${this.base()}/files${this.query({ page_size: PAGE_SIZE })}`,
-			method: "GET",
-			headers: this.headers(),
-		});
-		this.rootId = data.parent_folder?.id ?? null;
-		if (!this.rootId) {
-			throw new Error("Could not resolve RAGFlow root folder id.");
-		}
-		return { rootId: this.rootId, children: data.files ?? [] };
-	}
-
-	private async ensureRootId(): Promise<string> {
-		if (this.rootId) return this.rootId;
-		const { rootId } = await this.getRoot();
-		return rootId;
-	}
-
 	/**
-	 * Every folder under root as a "/"-joined relative path (e.g. "A/B/C"),
-	 * sorted, for the settings folder picker. Walks the tree depth-first reusing
-	 * the per-run listing cache. Excludes the root itself.
+	 * List every dataset, paginating fully. Memoized for the client's lifetime;
+	 * invalidated by this client's own dataset creates. Also used by the settings
+	 * tab to verify the connection (acts as a lightweight ping).
 	 */
-	async listAllFolderPaths(): Promise<string[]> {
-		const rootId = await this.ensureRootId();
-		const paths: string[] = [];
-		const walk = async (parentId: string, prefix: string): Promise<void> => {
-			const children = await this.listFolder(parentId);
-			for (const child of children) {
-				if (child.type !== "folder") continue;
-				const path = prefix ? `${prefix}/${child.name}` : child.name;
-				paths.push(path);
-				await walk(child.id, path);
-			}
-		};
-		await walk(rootId, "");
-		return paths.sort((a, b) => a.localeCompare(b));
-	}
+	async listDatasets(): Promise<RagflowDataset[]> {
+		if (this.datasetsCache) return this.datasetsCache;
 
-	/**
-	 * List all children of a folder, paginating fully. parentId omitted => root.
-	 * Memoized for the client's lifetime; invalidated by this client's own
-	 * writes (createFolder/uploadFile/deleteFiles/move). Internal: callers use
-	 * ensureFolderPath, which hides the cache entirely.
-	 */
-	private async listFolder(parentId?: string): Promise<RagflowFileNode[]> {
-		const key = parentId ?? "__root__";
-		const cached = this.childrenCache.get(key);
-		if (cached) return cached;
-
-		const all: RagflowFileNode[] = [];
+		const all: RagflowDataset[] = [];
 		let page = 1;
 		// eslint-disable-next-line no-constant-condition
 		while (true) {
-			const data = await this.send<{ total: number; files: RagflowFileNode[] }>({
-				url: `${this.base()}/files${this.query({
-					parent_id: parentId,
+			const data = await this.send<RagflowDataset[]>({
+				url: `${this.base()}/datasets${this.query({
 					page,
 					page_size: PAGE_SIZE,
 				})}`,
 				method: "GET",
 				headers: this.headers(),
 			});
-			const files = data.files ?? [];
-			all.push(...files);
-			if (files.length < PAGE_SIZE) break;
+			const items = data ?? [];
+			all.push(...items);
+			if (items.length < PAGE_SIZE) break;
 			page += 1;
 		}
-		this.childrenCache.set(key, all);
+		this.datasetsCache = all;
 		return all;
 	}
 
-	async createFolder(name: string, parentId?: string): Promise<RagflowFileNode> {
-		const node = await this.send<RagflowFileNode>({
-			url: `${this.base()}/files`,
+	/** Every dataset name, sorted, for the settings dataset picker. */
+	async listAllDatasetNames(): Promise<string[]> {
+		const datasets = await this.listDatasets();
+		return datasets
+			.map((d) => d.name)
+			.sort((a, b) => a.localeCompare(b));
+	}
+
+	async createDataset(name: string): Promise<RagflowDataset> {
+		const dataset = await this.send<RagflowDataset>({
+			url: `${this.base()}/datasets`,
 			method: "POST",
 			headers: this.headers({ "Content-Type": "application/json" }),
-			body: JSON.stringify({ name, parent_id: parentId, type: "folder" }),
+			body: JSON.stringify({ name }),
 		});
-		// Invalidate parent cache so the new folder is visible next listing.
-		this.childrenCache.delete(parentId ?? "__root__");
-		return node;
+		// Keep the cache coherent so a later lookup sees the new dataset.
+		if (this.datasetsCache) this.datasetsCache.push(dataset);
+		return dataset;
 	}
 
 	/**
-	 * Ensure a nested folder path exists under root (or baseParentId), creating
-	 * missing segments. Returns the id of the deepest folder.
+	 * Resolve a dataset id by name, creating the dataset if it does not exist.
+	 * Memoized per name within the client's lifetime.
 	 */
-	async ensureFolderPath(segments: string[], baseParentId?: string): Promise<string> {
-		let parentId = baseParentId ?? (await this.ensureRootId());
-		for (const segment of segments) {
-			if (!segment) continue;
-			const children = await this.listFolder(parentId);
-			const existing = children.find(
-				(c) => c.type === "folder" && c.name === segment
-			);
-			if (existing) {
-				parentId = existing.id;
-				continue;
-			}
-			try {
-				const created = await this.createFolder(segment, parentId);
-				parentId = created.id;
-			} catch (e) {
-				// Self-heal a stale "not found": the folder may already exist
-				// (cache drift or a concurrent create). Re-list fresh and adopt
-				// it; only rethrow if it genuinely isn't there.
-				this.childrenCache.delete(parentId);
-				const refreshed = await this.listFolder(parentId);
-				const found = refreshed.find(
-					(c) => c.type === "folder" && c.name === segment
-				);
-				if (!found) throw e;
-				parentId = found.id;
-			}
+	async ensureDatasetId(name: string): Promise<string> {
+		const trimmed = name.trim();
+		if (!trimmed) {
+			throw new Error("Mapping is missing a target dataset name.");
 		}
-		return parentId;
+		const cached = this.datasetIdByName.get(trimmed);
+		if (cached) return cached;
+
+		const datasets = await this.listDatasets();
+		const existing = datasets.find((d) => d.name === trimmed);
+		if (existing) {
+			this.datasetIdByName.set(trimmed, existing.id);
+			return existing.id;
+		}
+
+		try {
+			const created = await this.createDataset(trimmed);
+			this.datasetIdByName.set(trimmed, created.id);
+			return created.id;
+		} catch (e) {
+			// Self-heal a race/duplicate: the dataset may have appeared since we
+			// listed. Re-list fresh and adopt it; only rethrow if truly absent.
+			this.datasetsCache = null;
+			const refreshed = await this.listDatasets();
+			const found = refreshed.find((d) => d.name === trimmed);
+			if (!found) throw e;
+			this.datasetIdByName.set(trimmed, found.id);
+			return found.id;
+		}
 	}
 
-	async uploadFile(
-		parentId: string,
+	/**
+	 * Upload one document into a dataset. RAGFlow returns the created document(s);
+	 * the first one's id is what we track and later attach metadata to.
+	 */
+	async uploadDocument(
+		datasetId: string,
 		fileName: string,
 		bytes: ArrayBuffer,
 		contentType?: string
-	): Promise<RagflowFileNode> {
-		const { body, contentType: ct } = buildMultipart(
-			{ parent_id: parentId },
-			[{ field: "file", filename: fileName, data: bytes, contentType }]
-		);
-		const data = await this.send<RagflowFileNode | RagflowFileNode[]>({
-			url: `${this.base()}/files`,
+	): Promise<RagflowDocument> {
+		const { body, contentType: ct } = buildMultipart({}, [
+			{ field: "file", filename: fileName, data: bytes, contentType },
+		]);
+		const data = await this.send<RagflowDocument | RagflowDocument[]>({
+			url: `${this.base()}/datasets/${datasetId}/documents`,
 			method: "POST",
 			headers: this.headers({ "Content-Type": ct }),
 			body,
 		});
-		this.childrenCache.delete(parentId);
-		const node = Array.isArray(data) ? data[0] : data;
-		if (!node || !node.id) {
-			throw new Error(`Upload of "${fileName}" returned no file id.`);
+		const doc = Array.isArray(data) ? data[0] : data;
+		if (!doc || !doc.id) {
+			throw new Error(`Upload of "${fileName}" returned no document id.`);
 		}
-		return node;
+		return doc;
 	}
 
-	async deleteFiles(ids: string[]): Promise<void> {
+	/**
+	 * Set a document's metadata (the RAGFlow "meta_fields" on Update document).
+	 * Replaces the document's metadata wholesale with the provided fields.
+	 */
+	async setDocumentMetadata(
+		datasetId: string,
+		documentId: string,
+		meta: Record<string, unknown>
+	): Promise<void> {
+		await this.send({
+			url: `${this.base()}/datasets/${datasetId}/documents/${documentId}`,
+			method: "PUT",
+			headers: this.headers({ "Content-Type": "application/json" }),
+			body: JSON.stringify({ meta_fields: meta }),
+		});
+	}
+
+	async deleteDocuments(datasetId: string, ids: string[]): Promise<void> {
 		if (ids.length === 0) return;
 		await this.send({
-			url: `${this.base()}/files`,
+			url: `${this.base()}/datasets/${datasetId}/documents`,
 			method: "DELETE",
 			headers: this.headers({ "Content-Type": "application/json" }),
 			body: JSON.stringify({ ids }),
 		});
-		this.childrenCache.clear();
-	}
-
-	async moveOrRename(
-		srcFileIds: string[],
-		destFolderId?: string,
-		newName?: string
-	): Promise<void> {
-		await this.send({
-			url: `${this.base()}/files/move`,
-			method: "POST",
-			headers: this.headers({ "Content-Type": "application/json" }),
-			body: JSON.stringify({
-				src_file_ids: srcFileIds,
-				dest_file_id: destFolderId,
-				new_name: newName,
-			}),
-		});
-		this.childrenCache.clear();
 	}
 }

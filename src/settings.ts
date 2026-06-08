@@ -11,7 +11,7 @@ function normalizeFolder(value: string): string {
 export const DEFAULT_SETTINGS: RagflowSyncSettings = {
 	ragflowBaseUrl: "http://127.0.0.1:9380",
 	apiKey: "",
-	folderMappings: [],
+	datasetMappings: [],
 	extensions: ["md", "pdf", "docx"],
 	excludeGlobs: [".trash", ".obsidian"],
 	internalizeLinks: false,
@@ -20,8 +20,8 @@ export const DEFAULT_SETTINGS: RagflowSyncSettings = {
 
 export class RagflowSyncSettingTab extends PluginSettingTab {
 	plugin: RagflowSyncPlugin;
-	/** RAGFlow folder paths fetched for autocomplete; empty until loaded. */
-	private ragflowFolders: string[] = [];
+	/** RAGFlow dataset names fetched for autocomplete; empty until loaded. */
+	private ragflowDatasets: string[] = [];
 
 	constructor(app: App, plugin: RagflowSyncPlugin) {
 		super(app, plugin);
@@ -37,12 +37,12 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 		return ["", ...paths];
 	}
 
-	/** Lazily fetch RAGFlow folders for autocomplete; silent if not connected. */
-	private async loadRagflowFolders(): Promise<void> {
+	/** Lazily fetch RAGFlow datasets for autocomplete; silent if not connected. */
+	private async loadRagflowDatasets(): Promise<void> {
 		const { ragflowBaseUrl, apiKey } = this.plugin.settings;
 		if (!ragflowBaseUrl || !apiKey) return;
 		try {
-			this.ragflowFolders = ["", ...(await this.plugin.client.listAllFolderPaths())];
+			this.ragflowDatasets = await this.plugin.client.listAllDatasetNames();
 		} catch (_e) {
 			// No connection / bad key: leave suggestions empty, manual typing works.
 		}
@@ -51,9 +51,9 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-		// Populate RAGFlow folder suggestions in the background; the pickers read
-		// this.ragflowFolders fresh on each keystroke, so no re-render is needed.
-		void this.loadRagflowFolders();
+		// Populate RAGFlow dataset suggestions in the background; the pickers read
+		// this.ragflowDatasets fresh on each keystroke, so no re-render is needed.
+		void this.loadRagflowDatasets();
 
 		containerEl.createEl("h2", { text: "RAGFlow connection" });
 
@@ -72,7 +72,7 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("API key")
-			.setDesc("RAGFlow API key (Bearer). Same key works for File Management.")
+			.setDesc("RAGFlow API key (Bearer). Same key works for the Dataset API.")
 			.addText((text) => {
 				text.inputEl.type = "password";
 				text
@@ -86,13 +86,13 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName("Test connection")
-			.setDesc("Verify the base URL and API key by listing the RAGFlow root folder.")
+			.setDesc("Verify the base URL and API key by listing RAGFlow datasets.")
 			.addButton((btn) =>
 				btn.setButtonText("Test").onClick(async () => {
 					btn.setDisabled(true);
 					btn.setButtonText("Testing...");
 					try {
-						await this.plugin.client.getRoot();
+						await this.plugin.client.listDatasets();
 						new Notice("RAGFlow connection OK.");
 					} catch (e) {
 						new Notice(`Connection failed: ${(e as Error).message}`);
@@ -151,9 +151,9 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 					})
 			);
 
-		containerEl.createEl("h2", { text: "Folder mappings" });
+		containerEl.createEl("h2", { text: "Dataset mappings" });
 		containerEl.createEl("p", {
-			text: "Map a vault folder to a target folder inside RAGFlow File Management. Subfolders are mirrored recursively. Click a field to pick from existing folders (RAGFlow folders load after a successful Test connection); you can also type a new RAGFlow path and it will be created on sync.",
+			text: "Map a vault folder to a target RAGFlow dataset (knowledge base). Every in-scope file under the folder is uploaded directly into that dataset; the note's YAML frontmatter is stripped from the upload and set as the document's RAGFlow metadata instead. Click a field to pick from existing datasets (they load after a successful Test connection); you can also type a new dataset name and it will be created on sync.",
 			cls: "setting-item-description",
 		});
 
@@ -165,9 +165,9 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 				.setButtonText("Add mapping")
 				.setCta()
 				.onClick(async () => {
-					this.plugin.settings.folderMappings.push({
+					this.plugin.settings.datasetMappings.push({
 						vaultPath: "",
-						ragflowBaseFolder: "",
+						datasetName: "",
 					});
 					await this.plugin.saveSettings();
 					this.renderMappings(listEl);
@@ -177,7 +177,7 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 
 	private renderMappings(listEl: HTMLElement): void {
 		listEl.empty();
-		const mappings = this.plugin.settings.folderMappings;
+		const mappings = this.plugin.settings.datasetMappings;
 		if (mappings.length === 0) {
 			listEl.createEl("p", {
 				text: "No mappings yet.",
@@ -207,24 +207,24 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 			arrow.style.flex = "0 0 auto";
 
 			const ragInput = row.createEl("input", { type: "text" });
-			ragInput.placeholder = "RAGFlow folder (e.g. ObsidianVault/Research)";
-			ragInput.value = mapping.ragflowBaseFolder;
-			const setRagPath = async (value: string) => {
-				mapping.ragflowBaseFolder = normalizeFolder(value);
+			ragInput.placeholder = "RAGFlow dataset (e.g. ObsidianVault)";
+			ragInput.value = mapping.datasetName;
+			const setDataset = async (value: string) => {
+				mapping.datasetName = value.trim();
 				await this.plugin.saveSettings();
 			};
-			ragInput.addEventListener("change", () => setRagPath(ragInput.value));
+			ragInput.addEventListener("change", () => setDataset(ragInput.value));
 			new FolderInputSuggest(
 				this.app,
 				ragInput,
-				() => this.ragflowFolders,
-				(value) => void setRagPath(value)
+				() => this.ragflowDatasets,
+				(value) => void setDataset(value)
 			);
 
 			const removeBtn = row.createEl("button", { text: "✕" });
 			removeBtn.style.flex = "0 0 auto";
 			removeBtn.addEventListener("click", async () => {
-				this.plugin.settings.folderMappings.splice(index, 1);
+				this.plugin.settings.datasetMappings.splice(index, 1);
 				await this.plugin.saveSettings();
 				this.renderMappings(listEl);
 			});
