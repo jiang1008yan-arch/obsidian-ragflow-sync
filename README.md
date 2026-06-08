@@ -200,6 +200,13 @@ metadata `{ "title": "LLM Notes", "tags": ["ai", "research"], "status":
 frontmatter changes the file's content hash, so the note re-syncs and its
 metadata is refreshed on the next sync.
 
+Wikilinks inside frontmatter values are always cleaned to plain text before
+they become metadata, so RAGFlow never stores raw `[[...]]` syntax. A
+frontmatter value of `project: "[[Project A]]"` is sent as `"Project A"`, an
+alias like `"[[B|the B note]]"` becomes `"the B note"`, and lists or nested
+mappings are cleaned recursively. This applies unconditionally and is
+independent of the body link-internalization option below.
+
 ## Use The Plugin
 
 There are three ways to open or run sync actions:

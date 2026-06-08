@@ -635,6 +635,12 @@ function internalizeWikilinks(content) {
     (_m, inner) => linkDisplay(parseInner(inner))
   );
 }
+function stripWikilinks(text) {
+  return text.replace(
+    /!?\[\[([^[\]]+)\]\]/g,
+    (_m, inner) => linkDisplay(parseInner(inner))
+  );
+}
 function dedupe(titles) {
   return [...new Set(titles.filter((t) => t.length > 0))];
 }
@@ -669,6 +675,20 @@ function splitFrontmatter(text) {
     return { yaml: null, body: text };
   return { yaml: match[1] ?? "", body: text.slice(match[0].length) };
 }
+function cleanWikilinks(value) {
+  if (typeof value === "string")
+    return stripWikilinks(value);
+  if (Array.isArray(value))
+    return value.map(cleanWikilinks);
+  if (value !== null && typeof value === "object") {
+    const out = {};
+    for (const [key, v] of Object.entries(value)) {
+      out[key] = cleanWikilinks(v);
+    }
+    return out;
+  }
+  return value;
+}
 function normalizeMeta(parsed) {
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     return {};
@@ -677,7 +697,7 @@ function normalizeMeta(parsed) {
   for (const [key, value] of Object.entries(parsed)) {
     if (value === void 0)
       continue;
-    out[key] = value;
+    out[key] = cleanWikilinks(value);
   }
   return out;
 }
