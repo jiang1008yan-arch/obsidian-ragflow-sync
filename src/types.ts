@@ -32,6 +32,13 @@ export interface SyncedFileRecord {
 	size: number;
 	mtime: number;
 	lastSyncedAt: number;
+	/**
+	 * Version of the plugin's upload transform that produced this document.
+	 * When the current transform version is newer, the file is re-uploaded even
+	 * if its source content is unchanged. Absent on records written before
+	 * versioning existed, which forces a one-time re-sync.
+	 */
+	processingVersion?: number;
 }
 
 export interface SyncState {
@@ -74,6 +81,12 @@ export interface ScopeConfig {
 	/** Lowercase extensions without dots. */
 	extensions: string[];
 	excludeGlobs: string[];
+	/**
+	 * Current upload-transform version. A synced record whose processingVersion
+	 * differs is re-uploaded regardless of content. Omitted in pure-diff tests
+	 * that don't exercise versioning.
+	 */
+	processingVersion?: number;
 }
 
 /** A synced file that must be hashed to decide modified-vs-unchanged. */
@@ -89,6 +102,8 @@ export interface StatClassification {
 	unchanged: { entry: VaultEntry; record: SyncedFileRecord; mapping: DatasetMapping }[];
 	needHash: PendingHash[];
 	deletions: { vaultPath: string; record: SyncedFileRecord; mapping?: DatasetMapping }[];
+	/** Synced files whose processingVersion is stale: re-upload regardless of content. */
+	reprocess: { entry: VaultEntry; record: SyncedFileRecord; mapping: DatasetMapping }[];
 }
 
 /** A synced-state record whose stats drifted but whose content is unchanged. */

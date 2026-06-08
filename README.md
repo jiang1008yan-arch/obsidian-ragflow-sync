@@ -234,6 +234,21 @@ There are three ways to open or run sync actions:
 5. Wait for the final notice. The panel scans again after syncing so the latest
    state is visible.
 
+### Re-syncing After A Plugin Update
+
+The diff normally compares your notes' source content, so a note whose text has
+not changed is left alone. But when a plugin update changes how documents are
+*processed* on upload (for example, the metadata wikilink cleaning), the source
+is identical yet the uploaded result should change. To handle this the plugin
+tracks a processing version on every synced document: after an update that bumps
+it, your already-synced notes show up as `Modified` on the next `Scan diff` and
+re-upload once with the new processing — no manual action needed.
+
+If you ever need to rebuild RAGFlow's copies without any change to trigger it
+(for example you deleted documents on the RAGFlow side), use `Force re-sync all`
+in the panel, or run `RAGFlow Sync: Force re-sync all` from the command palette.
+This re-uploads every in-scope file regardless of the diff result.
+
 ## How Sync Works
 
 - New files are uploaded as documents into the mapped RAGFlow dataset. For
@@ -241,7 +256,8 @@ There are three ways to open or run sync actions:
 - Modified files are replaced by deleting the old document and uploading the new
   version (RAGFlow has no in-place replace), then re-applying metadata.
 - Deleted local files remove the previously synced document from its dataset.
-- Unchanged files are skipped.
+- Unchanged files are skipped — unless the plugin's processing version moved on
+  since they were synced, in which case they re-upload once (see above).
 
 Uploaded documents are not parsed/chunked automatically — trigger parsing in the
 RAGFlow UI (or via its API) when you are ready.

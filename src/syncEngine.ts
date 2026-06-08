@@ -17,6 +17,15 @@ import {
 	VaultEntry,
 } from "./types";
 
+/**
+ * Version of the Markdown upload transform (frontmatter strip, metadata
+ * wikilink cleaning, link internalization). Bump this whenever that processing
+ * changes so already-synced notes are re-uploaded on the next scan even though
+ * their source content is unchanged. Records written before versioning carry no
+ * version and so are treated as stale, forcing a one-time re-sync.
+ */
+export const PROCESSING_VERSION = 1;
+
 const CONTENT_TYPES: Record<string, string> = {
 	md: "text/markdown",
 	txt: "text/plain",
@@ -69,6 +78,7 @@ export class SyncEngine {
 			mappings: s.datasetMappings,
 			extensions: s.extensions,
 			excludeGlobs: s.excludeGlobs,
+			processingVersion: PROCESSING_VERSION,
 		};
 	}
 
@@ -226,6 +236,7 @@ export class SyncEngine {
 			size: file.stat.size,
 			mtime: file.stat.mtime,
 			lastSyncedAt: Date.now(),
+			processingVersion: PROCESSING_VERSION,
 		});
 	}
 

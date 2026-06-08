@@ -83,6 +83,20 @@ export class RagflowSyncView extends ItemView {
 		await this.syncChanges(this.changes);
 	}
 
+	/**
+	 * Re-upload every in-scope file regardless of diff result, by promoting
+	 * "unchanged" entries to "modified". Use when RAGFlow's copies must be
+	 * rebuilt without a content or processing-version change to trigger it.
+	 */
+	async forceSyncAll(): Promise<void> {
+		const forced = this.changes.map((c) =>
+			c.kind === "unchanged"
+				? { ...c, kind: "modified" as ChangeKind, hash: undefined }
+				: c
+		);
+		await this.syncChanges(forced);
+	}
+
 	async syncChanges(changes: FileChange[]): Promise<void> {
 		if (this.busy) return;
 		const actionable = changes.filter((c) => c.kind !== "unchanged");
@@ -125,6 +139,9 @@ export class RagflowSyncView extends ItemView {
 		const syncAllBtn = toolbar.createEl("button", { text: "Sync all" });
 		syncAllBtn.addClass("mod-cta");
 		syncAllBtn.onclick = () => void this.syncChanges(this.changes);
+
+		const forceBtn = toolbar.createEl("button", { text: "Force re-sync all" });
+		forceBtn.onclick = () => void this.forceSyncAll();
 
 		this.statusEl = container.createDiv({ cls: "ragflow-sync-status" });
 
