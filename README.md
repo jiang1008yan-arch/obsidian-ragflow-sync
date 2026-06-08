@@ -22,8 +22,9 @@ rather than noise in the document body. Your vault note is never modified.
 - Optionally internalize Obsidian double links: rewrite `[[wikilinks]]` and
   `![[embeds]]` to plain text/standard Markdown and append a related-notes
   section (outgoing links and backlinks) so the link graph survives in RAGFlow.
-- Optionally convert Markdown tables to HTML `<table>` blocks on upload so
-  RAGFlow keeps each table as one intact chunk instead of mis-aligning columns.
+- Optionally normalize Markdown tables on upload — escaping stray pipes (e.g.
+  from `[[Note|alias]]` links), padding columns, and adding blank lines — so
+  RAGFlow detects and aligns them instead of mis-splitting columns.
 
 ## Requirements
 
@@ -153,17 +154,26 @@ Note: change detection hashes the original file, so editing a note re-syncs it,
 but a change to a *different* note's backlinks does not by itself mark this note
 as modified. Re-sync that note (or sync all) to refresh its related section.
 
-### Tables To HTML
+### Table Normalization
 
 RAGFlow's Markdown chunker is fragile with pipe (`|`) tables: an unescaped pipe
 — notably from an Obsidian `[[Note|alias]]` link inside a cell — shifts every
 column, and tables without clean delimiter rows or surrounding blank lines get
-sliced into the surrounding prose. With `Convert tables to HTML` on (the
-default), each GFM table is rewritten to an HTML `<table>` before upload so
-RAGFlow keeps it intact as one structured chunk. The column splitter honors
-`[[ ]]`, inline `` `code` `` spans, and `\|` escapes, so pipes inside them never
-break a row. Tables inside fenced code blocks are left untouched, and your vault
-files are never modified.
+sliced into the surrounding prose. With `Normalize tables for RAGFlow` on (the
+default), each table is rewritten to clean border-style Markdown before upload:
+
+- Cells are parsed with awareness of `[[ ]]`, inline `` `code` `` spans, and
+  `\|` escapes, then re-emitted with any interior `|` escaped as `\|` so it can
+  never split a column.
+- Rows are padded/truncated to the header width, and a blank line is ensured
+  before and after the table.
+- Borderless tables are converted to border style; column alignment markers
+  (`:---`, `---:`, `:---:`) are preserved.
+
+This stays as Markdown — which RAGFlow's parser converts to a table itself and
+renders as one chunk across all versions, rather than the raw HTML that older
+RAGFlow builds display as literal tags. Tables inside fenced code blocks are
+left untouched, and your vault files are never modified.
 
 ### Dataset Mappings
 

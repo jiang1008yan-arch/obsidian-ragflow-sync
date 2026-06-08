@@ -5,7 +5,7 @@ import { sha256 } from "./hash";
 import { assembleChanges, classifyByStat, finalizeWithHashes } from "./diff";
 import { internalizeMarkdown, noteTitle } from "./internalize";
 import { normalizeMeta, splitFrontmatter } from "./frontmatter";
-import { tablesToHtml } from "./tables";
+import { normalizeTables } from "./tables";
 import {
 	ChangeKind,
 	DatasetMapping,
@@ -20,13 +20,13 @@ import {
 
 /**
  * Version of the Markdown upload transform (frontmatter strip, metadata
- * wikilink cleaning, link internalization, table-to-HTML conversion). Bump this
+ * wikilink cleaning, link internalization, table normalization). Bump this
  * whenever that processing changes so already-synced notes are re-uploaded on
  * the next scan even though their source content is unchanged. Records written
  * before versioning carry no version and so are treated as stale, forcing a
  * one-time re-sync.
  */
-export const PROCESSING_VERSION = 2;
+export const PROCESSING_VERSION = 3;
 
 const CONTENT_TYPES: Record<string, string> = {
 	md: "text/markdown",
@@ -268,8 +268,8 @@ export class SyncEngine {
 		let transformed = settings.internalizeLinks
 			? internalizeMarkdown(body, this.relatedLinks(path))
 			: body;
-		if (settings.tablesToHtml) {
-			transformed = tablesToHtml(transformed);
+		if (settings.normalizeTables) {
+			transformed = normalizeTables(transformed);
 		}
 		return {
 			uploadBytes: new TextEncoder().encode(transformed).buffer,

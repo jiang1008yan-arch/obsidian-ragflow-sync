@@ -20,11 +20,12 @@ export interface RagflowSyncSettings {
 	 */
 	internalizeLinks: boolean;
 	/**
-	 * When true, GFM ("|") tables in Markdown uploads are rewritten to HTML
-	 * <table> blocks so RAGFlow chunks them as one intact structure instead of
-	 * mis-aligning columns. The vault files themselves are never modified.
+	 * When true, GFM ("|") tables in Markdown uploads are rewritten to clean
+	 * border-style Markdown (interior pipes escaped, columns padded, blank lines
+	 * ensured) so RAGFlow's chunker detects and aligns them instead of
+	 * mis-splitting columns. The vault files themselves are never modified.
 	 */
-	tablesToHtml: boolean;
+	normalizeTables: boolean;
 	/** Persisted local sync state. */
 	state: SyncState;
 }

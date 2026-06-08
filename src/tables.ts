@@ -1,14 +1,18 @@
 /**
- * Pure conversion of GitHub-Flavored-Markdown tables into HTML <table> blocks.
- * No IO, no Obsidian: the SyncEngine hands the note body here before upload.
+ * Pure normalization of Markdown tables into the clean, border-style GFM that
+ * RAGFlow's Markdown chunker reliably detects and aligns. No IO, no Obsidian:
+ * the SyncEngine hands the note body here before upload.
  *
- * Why: RAGFlow's Markdown chunker is fragile with pipe ("|") tables — a single
- * unescaped pipe (notably from an Obsidian [[Note|alias]] link sitting inside a
- * cell) shifts every column, and tables that lack surrounding blank lines or a
- * clean delimiter row get sliced into the surrounding prose. An explicit HTML
- * table is unambiguous: RAGFlow keeps it intact as one structured chunk, and the
- * column-splitting here honors [[ ]] and `code` spans so pipes inside them never
- * break a row. The vault file is never modified; only the uploaded copy is.
+ * Why not HTML: RAGFlow's General/naive parser converts Markdown pipe tables to
+ * HTML itself and renders them as one table chunk, but only newer versions also
+ * detect pre-made HTML <table> blocks — older ones keep the raw tags as text.
+ * Normalized Markdown works across versions. The real cause of "mis-aligned"
+ * tables is a stray "|" inside a cell — most often an Obsidian [[Note|alias]]
+ * link — which shifts every column; here each cell is parsed with awareness of
+ * [[ ]], `code` spans, and \| escapes, then re-emitted with its interior pipes
+ * escaped so columns stay put. Rows are padded/truncated to the header width and
+ * a blank line is guaranteed on each side so the table is detected. The vault
+ * file is never modified; only the uploaded copy is.
  */
 
 /** Opening/closing fence for a code block; tables inside are left untouched. */
@@ -71,32 +75,53 @@ function isDelimiterRow(cells: string[]): boolean {
 	return cells.length > 0 && cells.every((c) => DELIM_CELL.test(c));
 }
 
-function esc(s: string): string {
-	return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+/**
+ * Make a parsed cell safe to re-emit between pipes: collapse any stray newlines
+ * and escape every interior "|" (e.g. from a [[Note|alias]] link or inline
+ * code) as "\|" so it can never split the column.
+ */
+function escapeCell(cell: string): string {
+	return cell.replace(/\s*\n\s*/g, " ").replace(/\|/g, "\\|").trim();
 }
 
-/** One <tr> with `n` cells of the given tag, padding/truncating to width. */
-function renderRow(tag: "th" | "td", cells: string[], n: number): string {
-	const padded = cells.slice(0, n);
+/** Normalize one delimiter cell to a canonical marker, preserving alignment. */
+function normalizeDelim(cell: string): string {
+	const left = cell.startsWith(":");
+	const right = cell.endsWith(":");
+	if (left && right) return ":---:";
+	if (right) return "---:";
+	if (left) return ":---";
+	return "---";
+}
+
+/** Emit one Markdown row, padding/truncating to the header width. */
+function renderRow(cells: string[], n: number): string {
+	const padded = cells.slice(0, n).map(escapeCell);
 	while (padded.length < n) padded.push("");
-	return `<tr>${padded.map((c) => `<${tag}>${esc(c)}</${tag}>`).join("")}</tr>`;
+	return `| ${padded.join(" | ")} |`;
 }
 
-function renderTable(header: string[], rows: string[][]): string {
+function renderTable(
+	header: string[],
+	delim: string[],
+	rows: string[][]
+): string {
 	const n = header.length;
-	const head = `<thead>\n${renderRow("th", header, n)}\n</thead>`;
-	const body =
-		rows.length > 0
-			? `\n<tbody>\n${rows.map((r) => renderRow("td", r, n)).join("\n")}\n</tbody>`
-			: "";
-	return `<table>\n${head}${body}\n</table>`;
+	const delimCells = delim.slice(0, n).map(normalizeDelim);
+	while (delimCells.length < n) delimCells.push("---");
+	return [
+		renderRow(header, n),
+		`| ${delimCells.join(" | ")} |`,
+		...rows.map((r) => renderRow(r, n)),
+	].join("\n");
 }
 
 /**
- * Rewrite every GFM table in the Markdown body to an HTML <table>, leaving all
- * other text (and tables inside fenced code blocks) untouched.
+ * Rewrite every GFM table in the Markdown body to clean border-style Markdown,
+ * leaving all other text (and tables inside fenced code blocks) untouched. A
+ * blank line is ensured before and after each table so RAGFlow detects it.
  */
-export function tablesToHtml(src: string): string {
+export function normalizeTables(src: string): string {
 	const lines = src.split("\n");
 	const out: string[] = [];
 	let inFence = false;
@@ -130,7 +155,9 @@ export function tablesToHtml(src: string): string {
 					rows.push(splitRow(l));
 					j++;
 				}
-				out.push(renderTable(header, rows));
+				if (out.length > 0 && out[out.length - 1].trim() !== "") out.push("");
+				out.push(renderTable(header, delim, rows));
+				if (lines[j] !== undefined && lines[j].trim() !== "") out.push("");
 				i = j - 1;
 				continue;
 			}

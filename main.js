@@ -66,7 +66,7 @@ var DEFAULT_SETTINGS = {
   extensions: ["md", "pdf", "docx"],
   excludeGlobs: [".trash", ".obsidian"],
   internalizeLinks: false,
-  tablesToHtml: true,
+  normalizeTables: true,
   state: { files: {} }
 };
 var RagflowSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
@@ -146,11 +146,11 @@ var RagflowSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
         await this.plugin.saveSettings();
       })
     );
-    new import_obsidian2.Setting(containerEl).setName("Convert tables to HTML").setDesc(
-      "When syncing Markdown, rewrite GFM pipe tables to HTML <table> blocks so RAGFlow keeps each table as one intact chunk instead of mis-aligning columns. Your vault files are never modified."
+    new import_obsidian2.Setting(containerEl).setName("Normalize tables for RAGFlow").setDesc(
+      "When syncing Markdown, rewrite tables to clean border-style Markdown \u2014 escaping stray pipes (e.g. from [[Note|alias]] links), padding columns, and adding surrounding blank lines \u2014 so RAGFlow detects and aligns them instead of mis-splitting columns. Your vault files are never modified."
     ).addToggle(
-      (toggle) => toggle.setValue(this.plugin.settings.tablesToHtml).onChange(async (value) => {
-        this.plugin.settings.tablesToHtml = value;
+      (toggle) => toggle.setValue(this.plugin.settings.normalizeTables).onChange(async (value) => {
+        this.plugin.settings.normalizeTables = value;
         await this.plugin.saveSettings();
       })
     );
@@ -774,29 +774,38 @@ function splitRow(line) {
 function isDelimiterRow(cells) {
   return cells.length > 0 && cells.every((c) => DELIM_CELL.test(c));
 }
-function esc(s) {
-  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+function escapeCell(cell) {
+  return cell.replace(/\s*\n\s*/g, " ").replace(/\|/g, "\\|").trim();
 }
-function renderRow(tag, cells, n) {
-  const padded = cells.slice(0, n);
+function normalizeDelim(cell) {
+  const left = cell.startsWith(":");
+  const right = cell.endsWith(":");
+  if (left && right)
+    return ":---:";
+  if (right)
+    return "---:";
+  if (left)
+    return ":---";
+  return "---";
+}
+function renderRow(cells, n) {
+  const padded = cells.slice(0, n).map(escapeCell);
   while (padded.length < n)
     padded.push("");
-  return `<tr>${padded.map((c) => `<${tag}>${esc(c)}</${tag}>`).join("")}</tr>`;
+  return `| ${padded.join(" | ")} |`;
 }
-function renderTable(header, rows) {
+function renderTable(header, delim, rows) {
   const n = header.length;
-  const head = `<thead>
-${renderRow("th", header, n)}
-</thead>`;
-  const body = rows.length > 0 ? `
-<tbody>
-${rows.map((r) => renderRow("td", r, n)).join("\n")}
-</tbody>` : "";
-  return `<table>
-${head}${body}
-</table>`;
+  const delimCells = delim.slice(0, n).map(normalizeDelim);
+  while (delimCells.length < n)
+    delimCells.push("---");
+  return [
+    renderRow(header, n),
+    `| ${delimCells.join(" | ")} |`,
+    ...rows.map((r) => renderRow(r, n))
+  ].join("\n");
 }
-function tablesToHtml(src) {
+function normalizeTables(src) {
   const lines = src.split("\n");
   const out = [];
   let inFence = false;
@@ -825,7 +834,11 @@ function tablesToHtml(src) {
           rows.push(splitRow(l));
           j++;
         }
-        out.push(renderTable(header, rows));
+        if (out.length > 0 && out[out.length - 1].trim() !== "")
+          out.push("");
+        out.push(renderTable(header, delim, rows));
+        if (lines[j] !== void 0 && lines[j].trim() !== "")
+          out.push("");
         i = j - 1;
         continue;
       }
@@ -836,7 +849,7 @@ function tablesToHtml(src) {
 }
 
 // src/syncEngine.ts
-var PROCESSING_VERSION = 2;
+var PROCESSING_VERSION = 3;
 var CONTENT_TYPES = {
   md: "text/markdown",
   txt: "text/plain",
@@ -1006,8 +1019,8 @@ var SyncEngine = class {
     }
     const settings = this.getSettings();
     let transformed = settings.internalizeLinks ? internalizeMarkdown(body, this.relatedLinks(path)) : body;
-    if (settings.tablesToHtml) {
-      transformed = tablesToHtml(transformed);
+    if (settings.normalizeTables) {
+      transformed = normalizeTables(transformed);
     }
     return {
       uploadBytes: new TextEncoder().encode(transformed).buffer,

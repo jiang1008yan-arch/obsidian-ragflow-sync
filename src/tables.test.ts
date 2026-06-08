@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { splitRow, tablesToHtml } from "./tables";
+import { splitRow, normalizeTables } from "./tables";
 
 describe("splitRow", () => {
 	it("drops optional leading/trailing edge pipes", () => {
@@ -22,86 +22,89 @@ describe("splitRow", () => {
 	});
 });
 
-describe("tablesToHtml", () => {
-	it("converts a simple GFM table to an HTML table", () => {
+describe("normalizeTables", () => {
+	it("leaves an already-canonical table unchanged", () => {
 		const src = ["| A | B |", "| --- | --- |", "| 1 | 2 |"].join("\n");
-		expect(tablesToHtml(src)).toBe(
-			[
-				"<table>",
-				"<thead>",
-				"<tr><th>A</th><th>B</th></tr>",
-				"</thead>",
-				"<tbody>",
-				"<tr><td>1</td><td>2</td></tr>",
-				"</tbody>",
-				"</table>",
-			].join("\n")
+		expect(normalizeTables(src)).toBe(src);
+	});
+
+	it("rewrites a borderless table to border style", () => {
+		const src = ["A | B", "--- | ---", "1 | 2"].join("\n");
+		expect(normalizeTables(src)).toBe(
+			["| A | B |", "| --- | --- |", "| 1 | 2 |"].join("\n")
 		);
 	});
 
-	it("preserves surrounding prose and blank lines", () => {
-		const src = [
-			"Intro paragraph.",
-			"",
-			"| A | B |",
-			"|---|---|",
-			"| 1 | 2 |",
-			"",
-			"Outro.",
-		].join("\n");
-		const out = tablesToHtml(src);
-		expect(out.startsWith("Intro paragraph.\n\n<table>")).toBe(true);
-		expect(out.endsWith("</table>\n\nOutro.")).toBe(true);
+	it("escapes a wikilink-alias pipe so columns stay aligned", () => {
+		const src = ["| Name | Ref |", "|---|---|", "| x | [[Note|alias]] |"].join(
+			"\n"
+		);
+		expect(normalizeTables(src)).toContain("| x | [[Note\\|alias]] |");
 	});
 
-	it("renders a header-only table with no tbody", () => {
-		const src = ["| A | B |", "| --- | --- |"].join("\n");
-		expect(tablesToHtml(src)).toBe(
-			[
-				"<table>",
-				"<thead>",
-				"<tr><th>A</th><th>B</th></tr>",
-				"</thead>",
-				"</table>",
-			].join("\n")
-		);
+	it("escapes any other interior pipe in a cell", () => {
+		const src = ["| A | B |", "|---|---|", "| a \\| b | c |"].join("\n");
+		expect(normalizeTables(src)).toContain("| a \\| b | c |");
 	});
 
 	it("pads short rows and truncates long ones to the header width", () => {
 		const src = ["| A | B |", "|---|---|", "| 1 |", "| x | y | z |"].join("\n");
-		const out = tablesToHtml(src);
-		expect(out).toContain("<tr><td>1</td><td></td></tr>");
-		expect(out).toContain("<tr><td>x</td><td>y</td></tr>");
+		const out = normalizeTables(src);
+		expect(out).toContain("| 1 |  |");
+		expect(out).toContain("| x | y |");
 	});
 
-	it("HTML-escapes cell content", () => {
-		const src = ["| A |", "|---|", "| a<b>&c |"].join("\n");
-		expect(tablesToHtml(src)).toContain("<td>a&lt;b&gt;&amp;c</td>");
-	});
-
-	it("keeps wikilink pipes from breaking columns", () => {
-		const src = ["| Name | Ref |", "|---|---|", "| x | [[Note|alias]] |"].join(
+	it("preserves column alignment markers", () => {
+		const src = ["| A | B | C |", "| :--- | ---: | :---: |", "| 1 | 2 | 3 |"].join(
 			"\n"
 		);
-		expect(tablesToHtml(src)).toContain(
-			"<tr><td>x</td><td>[[Note|alias]]</td></tr>"
+		expect(normalizeTables(src)).toContain("| :--- | ---: | :---: |");
+	});
+
+	it("inserts blank lines around a table that lacks them", () => {
+		const src = ["Intro", "| A | B |", "|---|---|", "| 1 | 2 |", "Outro"].join(
+			"\n"
 		);
+		expect(normalizeTables(src)).toBe(
+			[
+				"Intro",
+				"",
+				"| A | B |",
+				"| --- | --- |",
+				"| 1 | 2 |",
+				"",
+				"Outro",
+			].join("\n")
+		);
+	});
+
+	it("does not add extra blank lines when they already exist", () => {
+		const src = [
+			"Intro",
+			"",
+			"| A | B |",
+			"| --- | --- |",
+			"| 1 | 2 |",
+			"",
+			"Outro",
+		].join("\n");
+		expect(normalizeTables(src)).toBe(src);
 	});
 
 	it("leaves tables inside fenced code blocks untouched", () => {
 		const src = ["```", "| A | B |", "| --- | --- |", "| 1 | 2 |", "```"].join(
 			"\n"
 		);
-		expect(tablesToHtml(src)).toBe(src);
+		expect(normalizeTables(src)).toBe(src);
 	});
 
 	it("leaves text without tables untouched", () => {
 		const src = "Just a sentence with a | pipe but no table.";
-		expect(tablesToHtml(src)).toBe(src);
+		expect(normalizeTables(src)).toBe(src);
 	});
 
 	it("does not treat a pipe line without a delimiter row as a table", () => {
 		const src = ["| A | B |", "not a delimiter", "| 1 | 2 |"].join("\n");
-		expect(tablesToHtml(src)).toBe(src);
+		expect(normalizeTables(src)).toBe(src);
 	});
 });
