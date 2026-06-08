@@ -66,6 +66,7 @@ var DEFAULT_SETTINGS = {
   extensions: ["md", "pdf", "docx"],
   excludeGlobs: [".trash", ".obsidian"],
   internalizeLinks: false,
+  tablesToHtml: true,
   state: { files: {} }
 };
 var RagflowSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
@@ -142,6 +143,14 @@ var RagflowSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
     ).addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.internalizeLinks).onChange(async (value) => {
         this.plugin.settings.internalizeLinks = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    new import_obsidian2.Setting(containerEl).setName("Convert tables to HTML").setDesc(
+      "When syncing Markdown, rewrite GFM pipe tables to HTML <table> blocks so RAGFlow keeps each table as one intact chunk instead of mis-aligning columns. Your vault files are never modified."
+    ).addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.tablesToHtml).onChange(async (value) => {
+        this.plugin.settings.tablesToHtml = value;
         await this.plugin.saveSettings();
       })
     );
@@ -715,8 +724,119 @@ function normalizeMeta(parsed) {
   return out;
 }
 
+// src/tables.ts
+var FENCE = /^\s*(```|~~~)/;
+var DELIM_CELL = /^:?-+:?$/;
+function splitRow(line) {
+  const cells = [];
+  let cur = "";
+  let inCode = false;
+  let bracketDepth = 0;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === "\\" && i + 1 < line.length) {
+      const next = line[i + 1];
+      cur += next === "|" ? "|" : "\\" + next;
+      i++;
+      continue;
+    }
+    if (ch === "`") {
+      inCode = !inCode;
+      cur += ch;
+      continue;
+    }
+    if (!inCode && ch === "[" && line[i + 1] === "[") {
+      bracketDepth++;
+      cur += "[[";
+      i++;
+      continue;
+    }
+    if (!inCode && ch === "]" && line[i + 1] === "]" && bracketDepth > 0) {
+      bracketDepth--;
+      cur += "]]";
+      i++;
+      continue;
+    }
+    if (ch === "|" && !inCode && bracketDepth === 0) {
+      cells.push(cur);
+      cur = "";
+      continue;
+    }
+    cur += ch;
+  }
+  cells.push(cur);
+  if (cells.length > 1 && cells[0].trim() === "")
+    cells.shift();
+  if (cells.length > 1 && cells[cells.length - 1].trim() === "")
+    cells.pop();
+  return cells.map((c) => c.trim());
+}
+function isDelimiterRow(cells) {
+  return cells.length > 0 && cells.every((c) => DELIM_CELL.test(c));
+}
+function esc(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function renderRow(tag, cells, n) {
+  const padded = cells.slice(0, n);
+  while (padded.length < n)
+    padded.push("");
+  return `<tr>${padded.map((c) => `<${tag}>${esc(c)}</${tag}>`).join("")}</tr>`;
+}
+function renderTable(header, rows) {
+  const n = header.length;
+  const head = `<thead>
+${renderRow("th", header, n)}
+</thead>`;
+  const body = rows.length > 0 ? `
+<tbody>
+${rows.map((r) => renderRow("td", r, n)).join("\n")}
+</tbody>` : "";
+  return `<table>
+${head}${body}
+</table>`;
+}
+function tablesToHtml(src) {
+  const lines = src.split("\n");
+  const out = [];
+  let inFence = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (FENCE.test(line)) {
+      inFence = !inFence;
+      out.push(line);
+      continue;
+    }
+    if (inFence) {
+      out.push(line);
+      continue;
+    }
+    const next = lines[i + 1];
+    if (next !== void 0 && line.includes("|")) {
+      const header = splitRow(line);
+      const delim = splitRow(next);
+      if (header.length >= 1 && header.length === delim.length && isDelimiterRow(delim)) {
+        const rows = [];
+        let j = i + 2;
+        while (j < lines.length) {
+          const l = lines[j];
+          if (l.trim() === "" || FENCE.test(l) || !l.includes("|"))
+            break;
+          rows.push(splitRow(l));
+          j++;
+        }
+        out.push(renderTable(header, rows));
+        i = j - 1;
+        continue;
+      }
+    }
+    out.push(line);
+  }
+  return out.join("\n");
+}
+
 // src/syncEngine.ts
-var PROCESSING_VERSION = 1;
+var PROCESSING_VERSION = 2;
 var CONTENT_TYPES = {
   md: "text/markdown",
   txt: "text/plain",
@@ -869,9 +989,9 @@ var SyncEngine = class {
   }
   /**
    * Decode a Markdown file, strip its YAML frontmatter (parsed out as metadata),
-   * optionally internalize its links, and re-encode the body as UTF-8. The
-   * frontmatter becomes the document's RAGFlow metadata rather than living in
-   * the uploaded text.
+   * optionally internalize its links and convert its tables to HTML, then
+   * re-encode the body as UTF-8. The frontmatter becomes the document's RAGFlow
+   * metadata rather than living in the uploaded text.
    */
   prepareMarkdown(bytes, path) {
     const text = new TextDecoder().decode(bytes);
@@ -884,7 +1004,11 @@ var SyncEngine = class {
         console.error(`RAGFlow Sync: invalid frontmatter in ${path}:`, e);
       }
     }
-    const transformed = this.getSettings().internalizeLinks ? internalizeMarkdown(body, this.relatedLinks(path)) : body;
+    const settings = this.getSettings();
+    let transformed = settings.internalizeLinks ? internalizeMarkdown(body, this.relatedLinks(path)) : body;
+    if (settings.tablesToHtml) {
+      transformed = tablesToHtml(transformed);
+    }
     return {
       uploadBytes: new TextEncoder().encode(transformed).buffer,
       meta

@@ -5,6 +5,7 @@ import { sha256 } from "./hash";
 import { assembleChanges, classifyByStat, finalizeWithHashes } from "./diff";
 import { internalizeMarkdown, noteTitle } from "./internalize";
 import { normalizeMeta, splitFrontmatter } from "./frontmatter";
+import { tablesToHtml } from "./tables";
 import {
 	ChangeKind,
 	DatasetMapping,
@@ -19,12 +20,13 @@ import {
 
 /**
  * Version of the Markdown upload transform (frontmatter strip, metadata
- * wikilink cleaning, link internalization). Bump this whenever that processing
- * changes so already-synced notes are re-uploaded on the next scan even though
- * their source content is unchanged. Records written before versioning carry no
- * version and so are treated as stale, forcing a one-time re-sync.
+ * wikilink cleaning, link internalization, table-to-HTML conversion). Bump this
+ * whenever that processing changes so already-synced notes are re-uploaded on
+ * the next scan even though their source content is unchanged. Records written
+ * before versioning carry no version and so are treated as stale, forcing a
+ * one-time re-sync.
  */
-export const PROCESSING_VERSION = 1;
+export const PROCESSING_VERSION = 2;
 
 const CONTENT_TYPES: Record<string, string> = {
 	md: "text/markdown",
@@ -242,9 +244,9 @@ export class SyncEngine {
 
 	/**
 	 * Decode a Markdown file, strip its YAML frontmatter (parsed out as metadata),
-	 * optionally internalize its links, and re-encode the body as UTF-8. The
-	 * frontmatter becomes the document's RAGFlow metadata rather than living in
-	 * the uploaded text.
+	 * optionally internalize its links and convert its tables to HTML, then
+	 * re-encode the body as UTF-8. The frontmatter becomes the document's RAGFlow
+	 * metadata rather than living in the uploaded text.
 	 */
 	private prepareMarkdown(
 		bytes: ArrayBuffer,
@@ -262,9 +264,13 @@ export class SyncEngine {
 			}
 		}
 
-		const transformed = this.getSettings().internalizeLinks
+		const settings = this.getSettings();
+		let transformed = settings.internalizeLinks
 			? internalizeMarkdown(body, this.relatedLinks(path))
 			: body;
+		if (settings.tablesToHtml) {
+			transformed = tablesToHtml(transformed);
+		}
 		return {
 			uploadBytes: new TextEncoder().encode(transformed).buffer,
 			meta,

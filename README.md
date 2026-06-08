@@ -22,6 +22,8 @@ rather than noise in the document body. Your vault note is never modified.
 - Optionally internalize Obsidian double links: rewrite `[[wikilinks]]` and
   `![[embeds]]` to plain text/standard Markdown and append a related-notes
   section (outgoing links and backlinks) so the link graph survives in RAGFlow.
+- Optionally convert Markdown tables to HTML `<table>` blocks on upload so
+  RAGFlow keeps each table as one intact chunk instead of mis-aligning columns.
 
 ## Requirements
 
@@ -150,6 +152,18 @@ to RAGFlow. Backlinks are resolved from Obsidian's link graph at sync time.
 Note: change detection hashes the original file, so editing a note re-syncs it,
 but a change to a *different* note's backlinks does not by itself mark this note
 as modified. Re-sync that note (or sync all) to refresh its related section.
+
+### Tables To HTML
+
+RAGFlow's Markdown chunker is fragile with pipe (`|`) tables: an unescaped pipe
+— notably from an Obsidian `[[Note|alias]]` link inside a cell — shifts every
+column, and tables without clean delimiter rows or surrounding blank lines get
+sliced into the surrounding prose. With `Convert tables to HTML` on (the
+default), each GFM table is rewritten to an HTML `<table>` before upload so
+RAGFlow keeps it intact as one structured chunk. The column splitter honors
+`[[ ]]`, inline `` `code` `` spans, and `\|` escapes, so pipes inside them never
+break a row. Tables inside fenced code blocks are left untouched, and your vault
+files are never modified.
 
 ### Dataset Mappings
 

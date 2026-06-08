@@ -15,6 +15,7 @@ export const DEFAULT_SETTINGS: RagflowSyncSettings = {
 	extensions: ["md", "pdf", "docx"],
 	excludeGlobs: [".trash", ".obsidian"],
 	internalizeLinks: false,
+	tablesToHtml: true,
 	state: { files: {} },
 };
 
@@ -147,6 +148,20 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.internalizeLinks)
 					.onChange(async (value) => {
 						this.plugin.settings.internalizeLinks = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		new Setting(containerEl)
+			.setName("Convert tables to HTML")
+			.setDesc(
+				"When syncing Markdown, rewrite GFM pipe tables to HTML <table> blocks so RAGFlow keeps each table as one intact chunk instead of mis-aligning columns. Your vault files are never modified."
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.tablesToHtml)
+					.onChange(async (value) => {
+						this.plugin.settings.tablesToHtml = value;
 						await this.plugin.saveSettings();
 					})
 			);
