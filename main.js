@@ -508,7 +508,8 @@ function classifyByStat(snapshot, state, scope) {
     news: [],
     unchanged: [],
     needHash: [],
-    deletions: []
+    deletions: [],
+    reprocess: []
   };
   const inScopePaths = /* @__PURE__ */ new Set();
   for (const entry of snapshot) {
@@ -519,6 +520,8 @@ function classifyByStat(snapshot, state, scope) {
     const record = state.files[entry.path];
     if (!record) {
       result.news.push({ entry, mapping });
+    } else if (record.processingVersion !== scope.processingVersion) {
+      result.reprocess.push({ entry, record, mapping });
     } else if (record.size === entry.size && record.mtime === entry.mtime) {
       result.unchanged.push({ entry, record, mapping });
     } else {
@@ -579,6 +582,16 @@ function assembleChanges(stat, hashed) {
     });
   }
   changes.push(...hashed.modified);
+  for (const { entry, record, mapping } of stat.reprocess) {
+    changes.push({
+      kind: "modified",
+      vaultPath: entry.path,
+      mapping,
+      record,
+      size: entry.size,
+      mtime: entry.mtime
+    });
+  }
   for (const { vaultPath, record, mapping } of stat.deletions) {
     changes.push({ kind: "deleted", vaultPath, mapping, record });
   }
@@ -703,6 +716,7 @@ function normalizeMeta(parsed) {
 }
 
 // src/syncEngine.ts
+var PROCESSING_VERSION = 1;
 var CONTENT_TYPES = {
   md: "text/markdown",
   txt: "text/plain",
@@ -730,7 +744,8 @@ var SyncEngine = class {
     return {
       mappings: s.datasetMappings,
       extensions: s.extensions,
-      excludeGlobs: s.excludeGlobs
+      excludeGlobs: s.excludeGlobs,
+      processingVersion: PROCESSING_VERSION
     };
   }
   /** Obsidian adapter for the vault-snapshot seam: every file, unfiltered. */
@@ -848,7 +863,8 @@ var SyncEngine = class {
       hash,
       size: file.stat.size,
       mtime: file.stat.mtime,
-      lastSyncedAt: Date.now()
+      lastSyncedAt: Date.now(),
+      processingVersion: PROCESSING_VERSION
     });
   }
   /**
@@ -972,6 +988,17 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
   async syncAll() {
     await this.syncChanges(this.changes);
   }
+  /**
+   * Re-upload every in-scope file regardless of diff result, by promoting
+   * "unchanged" entries to "modified". Use when RAGFlow's copies must be
+   * rebuilt without a content or processing-version change to trigger it.
+   */
+  async forceSyncAll() {
+    const forced = this.changes.map(
+      (c) => c.kind === "unchanged" ? { ...c, kind: "modified", hash: void 0 } : c
+    );
+    await this.syncChanges(forced);
+  }
   async syncChanges(changes) {
     if (this.busy)
       return;
@@ -1012,6 +1039,8 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
     const syncAllBtn = toolbar.createEl("button", { text: "Sync all" });
     syncAllBtn.addClass("mod-cta");
     syncAllBtn.onclick = () => void this.syncChanges(this.changes);
+    const forceBtn = toolbar.createEl("button", { text: "Force re-sync all" });
+    forceBtn.onclick = () => void this.forceSyncAll();
     this.statusEl = container.createDiv({ cls: "ragflow-sync-status" });
     if (this.changes.length === 0) {
       container.createDiv({
@@ -1095,6 +1124,17 @@ var RagflowSyncPlugin = class extends import_obsidian6.Plugin {
           return;
         await view.scan();
         await view.syncAll();
+      }
+    });
+    this.addCommand({
+      id: "ragflow-force-resync",
+      name: "Force re-sync all (re-upload everything)",
+      callback: async () => {
+        const view = await this.activateView();
+        if (!view)
+          return;
+        await view.scan();
+        await view.forceSyncAll();
       }
     });
     this.addSettingTab(new RagflowSyncSettingTab(this.app, this));

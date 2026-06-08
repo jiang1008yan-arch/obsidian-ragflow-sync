@@ -101,6 +101,52 @@ describe("classifyByStat", () => {
 		expect(r.news[0].mapping.vaultPath).toBe("Notes");
 	});
 
+	describe("processing-version reprocess rule", () => {
+		it("reprocesses a record whose processingVersion is stale", () => {
+			const r = classifyByStat(
+				[entry("Notes/a.md", 10, 100)],
+				state({ "Notes/a.md": record({ size: 10, mtime: 100, processingVersion: 1 }) }),
+				scope({ processingVersion: 2 })
+			);
+			expect(r.reprocess.map((x) => x.entry.path)).toEqual(["Notes/a.md"]);
+			expect(r.unchanged).toHaveLength(0);
+			expect(r.needHash).toHaveLength(0);
+		});
+
+		it("reprocesses a pre-versioning record when a version is now set", () => {
+			const r = classifyByStat(
+				[entry("Notes/a.md", 10, 100)],
+				state({ "Notes/a.md": record({ size: 10, mtime: 100 }) }), // no version
+				scope({ processingVersion: 1 })
+			);
+			expect(r.reprocess.map((x) => x.entry.path)).toEqual(["Notes/a.md"]);
+		});
+
+		it("does not reprocess when versions match (stays on the fast path)", () => {
+			const r = classifyByStat(
+				[entry("Notes/a.md", 10, 100)],
+				state({ "Notes/a.md": record({ size: 10, mtime: 100, processingVersion: 2 }) }),
+				scope({ processingVersion: 2 })
+			);
+			expect(r.reprocess).toHaveLength(0);
+			expect(r.unchanged.map((u) => u.entry.path)).toEqual(["Notes/a.md"]);
+		});
+
+		it("surfaces a reprocessed file as a modified change with no hash", () => {
+			const stat = classifyByStat(
+				[entry("Notes/a.md", 10, 100)],
+				state({ "Notes/a.md": record({ size: 10, mtime: 100, processingVersion: 1 }) }),
+				scope({ processingVersion: 2 })
+			);
+			const hashed = finalizeWithHashes(stat.needHash, new Map());
+			const changes = assembleChanges(stat, hashed);
+			const modified = changes.filter((c) => c.kind === "modified");
+			expect(modified.map((c) => c.vaultPath)).toEqual(["Notes/a.md"]);
+			expect(modified[0].hash).toBeUndefined();
+			expect(modified[0].record).toBeDefined();
+		});
+	});
+
 	describe("deletion rule (full unmirror)", () => {
 		it("deletes a synced file that is gone from the snapshot", () => {
 			const r = classifyByStat(

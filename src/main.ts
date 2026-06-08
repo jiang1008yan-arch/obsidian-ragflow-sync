@@ -61,6 +61,17 @@ export default class RagflowSyncPlugin extends Plugin {
 			},
 		});
 
+		this.addCommand({
+			id: "ragflow-force-resync",
+			name: "Force re-sync all (re-upload everything)",
+			callback: async () => {
+				const view = await this.activateView();
+				if (!view) return;
+				await view.scan();
+				await view.forceSyncAll();
+			},
+		});
+
 		this.addSettingTab(new RagflowSyncSettingTab(this.app, this));
 	}
 

@@ -30,6 +30,7 @@ export function classifyByStat(
 		unchanged: [],
 		needHash: [],
 		deletions: [],
+		reprocess: [],
 	};
 	const inScopePaths = new Set<string>();
 
@@ -41,6 +42,10 @@ export function classifyByStat(
 		const record = state.files[entry.path];
 		if (!record) {
 			result.news.push({ entry, mapping });
+		} else if (record.processingVersion !== scope.processingVersion) {
+			// Stale transform version: re-upload even if the source is identical,
+			// so plugin processing changes reach already-synced documents.
+			result.reprocess.push({ entry, record, mapping });
 		} else if (record.size === entry.size && record.mtime === entry.mtime) {
 			result.unchanged.push({ entry, record, mapping });
 		} else {
@@ -119,6 +124,18 @@ export function assembleChanges(
 		});
 	}
 	changes.push(...hashed.modified);
+	// Version-stale files re-upload as "modified"; hash is left undefined so the
+	// upload step recomputes it from the current (unchanged) source bytes.
+	for (const { entry, record, mapping } of stat.reprocess) {
+		changes.push({
+			kind: "modified",
+			vaultPath: entry.path,
+			mapping,
+			record,
+			size: entry.size,
+			mtime: entry.mtime,
+		});
+	}
 	for (const { vaultPath, record, mapping } of stat.deletions) {
 		changes.push({ kind: "deleted", vaultPath, mapping, record });
 	}
