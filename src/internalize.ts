@@ -64,6 +64,20 @@ export function internalizeWikilinks(content: string): string {
 	);
 }
 
+/**
+ * Collapse every [[wikilink]] and ![[embed]] in a string to the plain text
+ * Obsidian would display (alias, else "Note > Heading", else note title). Unlike
+ * internalizeWikilinks, image embeds are NOT turned into Markdown image syntax:
+ * metadata values are plain text, so an embed becomes its display text too. Used
+ * to clean wikilinks out of frontmatter values before they become RAGFlow
+ * document metadata.
+ */
+export function stripWikilinks(text: string): string {
+	return text.replace(/!?\[\[([^[\]]+)\]\]/g, (_m, inner: string) =>
+		linkDisplay(parseInner(inner))
+	);
+}
+
 function dedupe(titles: string[]): string[] {
 	return [...new Set(titles.filter((t) => t.length > 0))];
 }

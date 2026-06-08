@@ -56,4 +56,28 @@ describe("normalizeMeta", () => {
 		expect(normalizeMeta("scalar")).toEqual({});
 		expect(normalizeMeta(["a", "b"])).toEqual({});
 	});
+
+	it("cleans wikilinks in string values to plain text", () => {
+		expect(
+			normalizeMeta({ project: "[[Project A]]", note: "see [[B|the B note]]" })
+		).toEqual({ project: "Project A", note: "see the B note" });
+	});
+
+	it("cleans wikilinks inside arrays of values", () => {
+		expect(normalizeMeta({ related: ["[[A]]", "[[notes/C|C]]"] })).toEqual({
+			related: ["A", "C"],
+		});
+	});
+
+	it("cleans wikilinks inside nested mappings", () => {
+		expect(normalizeMeta({ meta: { source: "[[Ref#Section]]" } })).toEqual({
+			meta: { source: "Ref > Section" },
+		});
+	});
+
+	it("strips embeds and leaves non-string values untouched", () => {
+		expect(
+			normalizeMeta({ cover: "![[image.png]]", count: 3, done: true })
+		).toEqual({ cover: "image.png", count: 3, done: true });
+	});
 });
