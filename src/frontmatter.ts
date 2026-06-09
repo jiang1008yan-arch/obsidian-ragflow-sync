@@ -49,6 +49,34 @@ function cleanWikilinks(value: unknown): unknown {
 }
 
 /**
+ * Collect the [[wikilink]] target paths referenced anywhere in a frontmatter
+ * value — strings, arrays, and nested mappings. Each target is stripped of its
+ * "|alias" and "#heading" so only the link path remains (e.g. "[[report.pdf]]"
+ * -> "report.pdf", "[[a/b|c]]" -> "a/b"). Reads the raw frontmatter text rather
+ * than relying on the host recognizing a property as a link, so a link survives
+ * even in a plain-text property. Pure.
+ */
+export function frontmatterLinkTargets(value: unknown): string[] {
+	const out: string[] = [];
+	const visit = (v: unknown): void => {
+		if (typeof v === "string") {
+			const re = /\[\[([^[\]]+)\]\]/g;
+			let m: RegExpExecArray | null;
+			while ((m = re.exec(v)) !== null) {
+				const path = m[1].split("|")[0].split("#")[0].trim();
+				if (path) out.push(path);
+			}
+		} else if (Array.isArray(v)) {
+			v.forEach(visit);
+		} else if (v !== null && typeof v === "object") {
+			Object.values(v as Record<string, unknown>).forEach(visit);
+		}
+	};
+	visit(value);
+	return out;
+}
+
+/**
  * Normalize a parsed-YAML value into a metadata object. Returns an empty object
  * unless the parse produced a plain key/value mapping; undefined-valued keys are
  * dropped so they are not sent as metadata. Wikilinks in values are cleaned to

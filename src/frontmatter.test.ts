@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { normalizeMeta, splitFrontmatter } from "./frontmatter";
+import {
+	frontmatterLinkTargets,
+	normalizeMeta,
+	splitFrontmatter,
+} from "./frontmatter";
 
 describe("splitFrontmatter", () => {
 	it("splits a leading frontmatter block from the body", () => {
@@ -35,6 +39,36 @@ describe("splitFrontmatter", () => {
 		const { yaml, body } = splitFrontmatter("---\ntitle: Hi\n---");
 		expect(yaml).toBe("title: Hi");
 		expect(body).toBe("");
+	});
+});
+
+describe("frontmatterLinkTargets", () => {
+	it("extracts a link target carrying an extension", () => {
+		expect(frontmatterLinkTargets({ file: "[[report.pdf]]" })).toEqual([
+			"report.pdf",
+		]);
+	});
+
+	it("strips alias and heading, keeping only the link path", () => {
+		expect(
+			frontmatterLinkTargets({ a: "[[Notes/Doc|Display]]", b: "[[X#Head]]" })
+		).toEqual(["Notes/Doc", "X"]);
+	});
+
+	it("finds links inside arrays and nested mappings", () => {
+		expect(
+			frontmatterLinkTargets({
+				files: ["[[a.pdf]]", "plain", "[[b.docx]]"],
+				meta: { source: "see [[c.pdf]]" },
+			})
+		).toEqual(["a.pdf", "b.docx", "c.pdf"]);
+	});
+
+	it("handles embeds and returns nothing when there are no links", () => {
+		expect(frontmatterLinkTargets({ cover: "![[img.png]]" })).toEqual([
+			"img.png",
+		]);
+		expect(frontmatterLinkTargets({ title: "No links here", n: 3 })).toEqual([]);
 	});
 });
 

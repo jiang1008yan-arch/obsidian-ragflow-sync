@@ -729,6 +729,26 @@ function cleanWikilinks(value) {
   }
   return value;
 }
+function frontmatterLinkTargets(value) {
+  const out = [];
+  const visit = (v) => {
+    if (typeof v === "string") {
+      const re = /\[\[([^[\]]+)\]\]/g;
+      let m;
+      while ((m = re.exec(v)) !== null) {
+        const path = m[1].split("|")[0].split("#")[0].trim();
+        if (path)
+          out.push(path);
+      }
+    } else if (Array.isArray(v)) {
+      v.forEach(visit);
+    } else if (v !== null && typeof v === "object") {
+      Object.values(v).forEach(visit);
+    }
+  };
+  visit(value);
+  return out;
+}
 function normalizeMeta(parsed) {
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
     return {};
@@ -1006,7 +1026,7 @@ var SyncEngine = class {
     let meta = prepared.meta;
     const sourceFolder = change.mapping?.companionSourceFolder;
     if (Object.keys(meta).length === 0 && sourceFolder) {
-      const found = this.companionIndex?.get(sourceFolder)?.get(file.path);
+      const found = this.lookupCompanion(sourceFolder, file);
       if (found)
         meta = found;
     }
@@ -1070,8 +1090,9 @@ var SyncEngine = class {
    * note's frontmatter links to a file (e.g. `file: "[[report.pdf]]"`), record
    * that the linked file inherits the note's normalized frontmatter. Keyed by
    * source folder so an attachment only matches notes from its own mapping's
-   * folder. Frontmatter links come from Obsidian's metadata cache, so pairing is
-   * by the explicit `[[...]]` reference rather than by filename.
+   * folder. The link target is read straight from the frontmatter text and
+   * indexed under several keys (see indexCompanionTarget) so resolution survives
+   * a link that carries an extension, omits one, or does not resolve uniquely.
    */
   buildCompanionIndex() {
     const index = /* @__PURE__ */ new Map();
@@ -1079,27 +1100,53 @@ var SyncEngine = class {
       this.getSettings().datasetMappings.map((m) => m.companionSourceFolder).filter((f) => !!f && f.length > 0)
     );
     for (const folder of folders) {
-      const byTarget = /* @__PURE__ */ new Map();
+      const map = /* @__PURE__ */ new Map();
       const prefix = `${folder}/`;
-      const notes = this.app.vault.getMarkdownFiles().filter((f) => f.path.startsWith(prefix));
+      const notes = this.app.vault.getMarkdownFiles().filter((f) => f.path === folder || f.path.startsWith(prefix));
       for (const note of notes) {
-        const cache = this.app.metadataCache.getFileCache(note);
-        const links = cache?.frontmatterLinks;
-        if (!cache?.frontmatter || !links || links.length === 0)
+        const fm = this.app.metadataCache.getFileCache(note)?.frontmatter;
+        if (!fm)
           continue;
-        const meta = normalizeMeta(cache.frontmatter);
-        for (const link of links) {
-          const dest = this.app.metadataCache.getFirstLinkpathDest(
-            link.link,
-            note.path
-          );
-          if (dest)
-            byTarget.set(dest.path, meta);
+        const targets = frontmatterLinkTargets(fm);
+        if (targets.length === 0)
+          continue;
+        const meta = normalizeMeta(fm);
+        for (const target of targets) {
+          this.indexCompanionTarget(map, note, target, meta);
         }
       }
-      index.set(folder, byTarget);
+      index.set(folder, map);
     }
     return index;
+  }
+  /**
+   * Record a companion match under every key a later upload might look it up by,
+   * so a link survives whether or not it carries an extension and whether or not
+   * it resolves to a unique vault path: the resolved path (when Obsidian can
+   * resolve it), plus the link's file name and its extension-less base, both
+   * lower-cased and prefixed so the key spaces never collide.
+   */
+  indexCompanionTarget(map, note, linkpath, meta) {
+    const dest = this.app.metadataCache.getFirstLinkpathDest(
+      linkpath,
+      note.path
+    );
+    if (dest)
+      map.set(dest.path, meta);
+    const name = (linkpath.split("/").pop() ?? linkpath).trim();
+    if (!name)
+      return;
+    map.set(`name:${name.toLowerCase()}`, meta);
+    const dot = name.lastIndexOf(".");
+    const base = dot > 0 ? name.slice(0, dot) : name;
+    map.set(`base:${base.toLowerCase()}`, meta);
+  }
+  /** A file's companion metadata: by resolved path, then file name, then base. */
+  lookupCompanion(sourceFolder, file) {
+    const map = this.companionIndex?.get(sourceFolder);
+    if (!map)
+      return void 0;
+    return map.get(file.path) ?? map.get(`name:${file.name.toLowerCase()}`) ?? map.get(`base:${file.basename.toLowerCase()}`);
   }
   /**
    * Outgoing links and backlinks for a note, as titles, from Obsidian's
