@@ -106,11 +106,6 @@ export default class RagflowSyncPlugin extends Plugin {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
 		// Ensure nested state object exists and is well-formed.
 		this.settings.state = Object.assign({ files: {} }, data.state ?? {});
-		// Own the array rather than sharing DEFAULT_SETTINGS' reference, so edits
-		// (and the migration below) never mutate the defaults.
-		this.settings.companionMetadataPaths = [
-			...(data.companionMetadataPaths ?? []),
-		];
 		this.migrateLegacyData(data);
 	}
 
@@ -132,19 +127,14 @@ export default class RagflowSyncPlugin extends Plugin {
 			}));
 		}
 		delete (this.settings as unknown as Record<string, unknown>).folderMappings;
-
-		// The per-mapping `companionMetadata` flag was replaced by the path-based
-		// `companionMetadataPaths` list. Carry any enabled mappings over, then drop
-		// the obsolete flag from each mapping.
+		// Drop fields from earlier companion-metadata designs (a per-mapping flag,
+		// then a separate path list); companion metadata is now a per-mapping
+		// source folder, so these no longer carry meaning.
+		delete (this.settings as unknown as Record<string, unknown>)
+			.companionMetadataPaths;
 		for (const mapping of this.settings.datasetMappings as Array<
 			DatasetMapping & { companionMetadata?: boolean }
 		>) {
-			if (
-				mapping.companionMetadata &&
-				!this.settings.companionMetadataPaths.includes(mapping.vaultPath)
-			) {
-				this.settings.companionMetadataPaths.push(mapping.vaultPath);
-			}
 			delete mapping.companionMetadata;
 		}
 

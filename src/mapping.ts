@@ -30,18 +30,6 @@ export function owningMapping(
 	});
 }
 
-/**
- * Whether a vault path is selected by a list of companion-metadata entries: it
- * matches when the path equals an entry (a single file) or sits under one (a
- * folder). Empty entries are ignored so a stray blank row never selects the
- * whole vault. Pure.
- */
-export function isCompanionPath(vaultPath: string, paths: string[]): boolean {
-	return paths.some(
-		(p) => p.length > 0 && (vaultPath === p || vaultPath.startsWith(`${p}/`))
-	);
-}
-
 /** A vault file is in-scope if owned by a mapping, allowed by extension, and not excluded. */
 export function isInScope(
 	vaultPath: string,

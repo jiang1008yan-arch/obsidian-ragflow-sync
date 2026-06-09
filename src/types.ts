@@ -3,6 +3,16 @@ export interface DatasetMapping {
 	vaultPath: string;
 	/** Target RAGFlow dataset (knowledge base) name; created on sync if missing. */
 	datasetName: string;
+	/**
+	 * Optional vault folder holding "metadata notes" for this mapping. A file
+	 * under the mapping that has no metadata of its own (chiefly an attachment
+	 * like a PDF) inherits the frontmatter of a note in this folder whose
+	 * frontmatter links to it (e.g. a note with `file: "[[report.pdf]]"` supplies
+	 * metadata for report.pdf), set as the document's RAGFlow metadata. Pairing is
+	 * by the explicit frontmatter link, not by filename, so names need not match.
+	 * Empty/undefined disables companion metadata for the mapping.
+	 */
+	companionSourceFolder?: string;
 }
 
 export interface RagflowSyncSettings {
@@ -26,14 +36,6 @@ export interface RagflowSyncSettings {
 	 * mis-splitting columns. The vault files themselves are never modified.
 	 */
 	normalizeTables: boolean;
-	/**
-	 * Vault folders and/or individual files (relative paths, no leading slash)
-	 * for which metadata-less uploads inherit a same-named ".md" companion note's
-	 * frontmatter as their RAGFlow metadata. A file qualifies if its path equals,
-	 * or sits under, one of these entries — so you pick exactly which files and
-	 * folders use companion metadata rather than toggling whole mappings.
-	 */
-	companionMetadataPaths: string[];
 	/** Persisted local sync state. */
 	state: SyncState;
 }

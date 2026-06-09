@@ -102,3 +102,8 @@
 .ragflow-mapping-row input {
 	flex: 1;
 }
+
+.ragflow-mapping-row .ragflow-mapping-meta-select {
+	flex: 0 1 auto;
+	max-width: 40%;
+}
