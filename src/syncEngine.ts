@@ -3,6 +3,7 @@ import { RagflowClient } from "./ragflowClient";
 import { SyncStateStore } from "./syncState";
 import { sha256 } from "./hash";
 import { assembleChanges, classifyByStat, finalizeWithHashes } from "./diff";
+import { isCompanionPath } from "./mapping";
 import { internalizeMarkdown, noteTitle } from "./internalize";
 import { normalizeMeta, splitFrontmatter } from "./frontmatter";
 import { normalizeTables } from "./tables";
@@ -212,13 +213,14 @@ export class SyncEngine {
 		const uploadBytes = prepared.uploadBytes;
 		let meta = prepared.meta;
 
-		// Companion metadata (opt-in per mapping): a file with no metadata of its
-		// own — chiefly an attachment like a PDF — inherits the frontmatter of a
-		// same-named ".md" note beside it. Files that already carry their own
-		// metadata, and files with no companion note, are left as-is.
+		// Companion metadata (opt-in by path): a file with no metadata of its own
+		// — chiefly an attachment like a PDF — inherits the frontmatter of a
+		// same-named ".md" note beside it, when its path is selected in
+		// companionMetadataPaths. Files that already carry their own metadata, and
+		// files with no companion note, are left as-is.
 		if (
-			change.mapping?.companionMetadata &&
-			Object.keys(meta).length === 0
+			Object.keys(meta).length === 0 &&
+			isCompanionPath(file.path, this.getSettings().companionMetadataPaths)
 		) {
 			meta = await this.companionMeta(file);
 		}
