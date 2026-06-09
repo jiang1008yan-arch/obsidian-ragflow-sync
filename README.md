@@ -234,26 +234,38 @@ independent of the body link-internalization option below.
 #### Companion Metadata For Attachments
 
 Attachments such as PDFs have no frontmatter of their own, so by default they
-upload without any metadata. The **Companion metadata** settings section closes
-that gap: add the vault folders and individual files whose metadata-less uploads
-should inherit the frontmatter of a same-named `.md` note beside them. For
-example, with `Papers` (or just `Papers/report.pdf`) listed, `Papers/report.pdf`
-takes its RAGFlow metadata from `Papers/report.md`.
+upload without any metadata. Each dataset mapping has a **Companion meta**
+dropdown that closes that gap: pick a vault folder of "metadata notes", and a
+metadata-less file under the mapping inherits the frontmatter of a note in that
+folder **whose frontmatter links to it**.
 
-A file qualifies when its path equals, or sits under, a listed entry, so you
-choose exactly which files and folders use the feature rather than toggling
-whole mappings. Leave the list empty to turn it off.
+Pairing is by the explicit `[[...]]` link, not by filename — so the note name
+need not match the attachment, which matters when names differ or a note is
+referenced from many places. For example, with a mapping's Companion meta folder
+set to `Index`, a note `Index/anything.md` containing:
+
+```yaml
+---
+file: "[[report.pdf]]"
+title: Quarterly Report
+tags: [finance, 2025]
+---
+```
+
+makes `report.pdf` upload with RAGFlow metadata `{ "file": "report.pdf",
+"title": "Quarterly Report", "tags": ["finance", "2025"] }`. Leave the dropdown
+on "Companion meta: off" to disable it for that mapping.
 
 This is deliberately separate from the always-on "a note's own frontmatter
 becomes its own metadata" behavior above, so the two never mix:
 
-- A file that already has its own metadata (a Markdown note with frontmatter) is
-  left to the always-on behavior; the companion lookup is skipped.
-- A file with no companion note beside it is uploaded without metadata — the
-  option simply does nothing for it.
+- A file that already has its own metadata (a Markdown note with frontmatter)
+  keeps the always-on behavior; the companion lookup is skipped for it.
+- A file that no note in the source folder links to is uploaded without
+  metadata — the dropdown simply does nothing for it.
 
-The companion note is read only for its frontmatter; it is still uploaded as its
-own document in the usual way (it does not need to be excluded from scope).
+The metadata notes are read only for their frontmatter links; they still upload
+as their own documents in the usual way.
 
 ## Use The Plugin
 

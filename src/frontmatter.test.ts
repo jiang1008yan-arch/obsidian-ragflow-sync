@@ -80,4 +80,20 @@ describe("normalizeMeta", () => {
 			normalizeMeta({ cover: "![[image.png]]", count: 3, done: true })
 		).toEqual({ cover: "image.png", count: 3, done: true });
 	});
+
+	it("strips the wikilink structure from a companion note's file link", () => {
+		// The companion-metadata path normalizes a source note's frontmatter, whose
+		// link to the attachment must reach RAGFlow as plain text, not "[[...]]".
+		expect(
+			normalizeMeta({
+				file: "[[report.pdf]]",
+				title: "Quarterly Report",
+				tags: ["finance", "2025"],
+			})
+		).toEqual({
+			file: "report.pdf",
+			title: "Quarterly Report",
+			tags: ["finance", "2025"],
+		});
+	});
 });

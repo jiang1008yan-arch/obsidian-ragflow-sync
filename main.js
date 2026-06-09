@@ -67,7 +67,6 @@ var DEFAULT_SETTINGS = {
   excludeGlobs: [".trash", ".obsidian"],
   internalizeLinks: false,
   normalizeTables: true,
-  companionMetadataPaths: [],
   state: { files: {} }
 };
 var RagflowSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
@@ -157,7 +156,7 @@ var RagflowSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
     );
     containerEl.createEl("h2", { text: "Dataset mappings" });
     containerEl.createEl("p", {
-      text: "Map a vault folder to a target RAGFlow dataset (knowledge base). Every in-scope file under the folder is uploaded directly into that dataset; the note's YAML frontmatter is stripped from the upload and set as the document's RAGFlow metadata instead. Click a field to pick from existing datasets (they load after a successful Test connection); you can also type a new dataset name and it will be created on sync.",
+      text: `Map a vault folder to a target RAGFlow dataset (knowledge base). Every in-scope file under the folder is uploaded directly into that dataset; the note's YAML frontmatter is stripped from the upload and set as the document's RAGFlow metadata instead. Click a field to pick from existing datasets (they load after a successful Test connection); you can also type a new dataset name and it will be created on sync. The "Companion meta" dropdown optionally pairs the mapping with a source folder of metadata notes \u2014 a metadata-less file (e.g. a PDF) then inherits the frontmatter of a note in that folder whose frontmatter links to it, e.g. a note with file: "[[report.pdf]]".`,
       cls: "setting-item-description"
     });
     const listEl = containerEl.createDiv();
@@ -172,61 +171,6 @@ var RagflowSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
         this.renderMappings(listEl);
       })
     );
-    containerEl.createEl("h2", { text: "Companion metadata" });
-    containerEl.createEl("p", {
-      text: "Pick the vault folders and individual files whose metadata-less uploads (chiefly attachments like PDFs) should inherit the frontmatter of a same-named .md note beside them \u2014 e.g. Papers/report.pdf takes its metadata from Papers/report.md. A file qualifies if its path equals, or sits under, a listed entry. Files that already have their own frontmatter, and files with no companion note, are left untouched. Leave this list empty to turn the feature off.",
-      cls: "setting-item-description"
-    });
-    const companionListEl = containerEl.createDiv();
-    this.renderCompanionPaths(companionListEl);
-    new import_obsidian2.Setting(containerEl).addButton(
-      (btn) => btn.setButtonText("Add path").setCta().onClick(async () => {
-        this.plugin.settings.companionMetadataPaths.push("");
-        await this.plugin.saveSettings();
-        this.renderCompanionPaths(companionListEl);
-      })
-    );
-  }
-  /** Vault folders and files as picker candidates for companion-metadata paths. */
-  vaultFilesAndFolders() {
-    const folders = this.app.vault.getAllFolders(false).map((f) => f.path);
-    const files = this.app.vault.getFiles().map((f) => f.path);
-    return [...folders, ...files].filter((p) => p.length > 0).sort((a, b) => a.localeCompare(b));
-  }
-  renderCompanionPaths(listEl) {
-    listEl.empty();
-    const paths = this.plugin.settings.companionMetadataPaths;
-    if (paths.length === 0) {
-      listEl.createEl("p", {
-        text: "No paths yet \u2014 companion metadata is off.",
-        cls: "setting-item-description"
-      });
-      return;
-    }
-    paths.forEach((path, index) => {
-      const row = listEl.createDiv({ cls: "ragflow-mapping-row" });
-      const input = row.createEl("input", { type: "text" });
-      input.placeholder = "Folder or file (e.g. Papers or Papers/report.pdf)";
-      input.value = path;
-      const setPath = async (value) => {
-        this.plugin.settings.companionMetadataPaths[index] = normalizeFolder(value);
-        await this.plugin.saveSettings();
-      };
-      input.addEventListener("change", () => setPath(input.value));
-      new FolderInputSuggest(
-        this.app,
-        input,
-        () => this.vaultFilesAndFolders(),
-        (value) => void setPath(value)
-      );
-      const removeBtn = row.createEl("button", { text: "\u2715" });
-      removeBtn.style.flex = "0 0 auto";
-      removeBtn.addEventListener("click", async () => {
-        this.plugin.settings.companionMetadataPaths.splice(index, 1);
-        await this.plugin.saveSettings();
-        this.renderCompanionPaths(listEl);
-      });
-    });
   }
   renderMappings(listEl) {
     listEl.empty();
@@ -270,6 +214,24 @@ var RagflowSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
         () => this.ragflowDatasets,
         (value) => void setDataset(value)
       );
+      const metaSelect = row.createEl("select", {
+        cls: "ragflow-mapping-meta-select"
+      });
+      metaSelect.title = "Companion meta source: a metadata-less file here inherits the frontmatter of a note in this folder whose frontmatter links to the file.";
+      metaSelect.createEl("option", {
+        text: "Companion meta: off",
+        value: ""
+      });
+      for (const folder of this.vaultFolders()) {
+        if (folder === "")
+          continue;
+        metaSelect.createEl("option", { text: folder, value: folder });
+      }
+      metaSelect.value = mapping.companionSourceFolder ?? "";
+      metaSelect.addEventListener("change", async () => {
+        mapping.companionSourceFolder = metaSelect.value || void 0;
+        await this.plugin.saveSettings();
+      });
       const removeBtn = row.createEl("button", { text: "\u2715" });
       removeBtn.style.flex = "0 0 auto";
       removeBtn.addEventListener("click", async () => {
@@ -557,11 +519,6 @@ function owningMapping(vaultPath, scope) {
     const prefix = prefixOf(m);
     return prefix === "" ? true : vaultPath.startsWith(prefix);
   });
-}
-function isCompanionPath(vaultPath, paths) {
-  return paths.some(
-    (p) => p.length > 0 && (vaultPath === p || vaultPath.startsWith(`${p}/`))
-  );
 }
 function isInScope(vaultPath, scope) {
   if (!scope.extensions.includes(extensionOf(vaultPath)))
@@ -928,6 +885,12 @@ var CONTENT_TYPES = {
 };
 var SyncEngine = class {
   constructor(app, client, store, getSettings) {
+    /**
+     * Per-run companion-metadata lookup, built at the start of applyChanges and
+     * cleared at the end: source folder -> (linked-file path -> that note's
+     * frontmatter). Null outside an apply run.
+     */
+    this.companionIndex = null;
     this.app = app;
     this.client = client;
     this.store = store;
@@ -993,27 +956,32 @@ var SyncEngine = class {
     const actionable = changes.filter((c) => c.kind !== "unchanged");
     let done = 0;
     const result = { ok: 0, failed: 0, errors: [] };
-    for (const change of actionable) {
-      try {
-        if (change.kind === "new") {
-          await this.syncUpload(change, void 0);
-        } else if (change.kind === "modified") {
-          await this.syncUpload(change, change.record);
-        } else if (change.kind === "deleted") {
-          if (change.record) {
-            await this.client.deleteDocuments(change.record.datasetId, [
-              change.record.documentId
-            ]);
+    this.companionIndex = this.buildCompanionIndex();
+    try {
+      for (const change of actionable) {
+        try {
+          if (change.kind === "new") {
+            await this.syncUpload(change, void 0);
+          } else if (change.kind === "modified") {
+            await this.syncUpload(change, change.record);
+          } else if (change.kind === "deleted") {
+            if (change.record) {
+              await this.client.deleteDocuments(change.record.datasetId, [
+                change.record.documentId
+              ]);
+            }
+            await this.store.deleteFile(change.vaultPath);
           }
-          await this.store.deleteFile(change.vaultPath);
+          result.ok += 1;
+        } catch (e) {
+          result.failed += 1;
+          result.errors.push(`${change.vaultPath}: ${e.message}`);
         }
-        result.ok += 1;
-      } catch (e) {
-        result.failed += 1;
-        result.errors.push(`${change.vaultPath}: ${e.message}`);
+        done += 1;
+        onProgress?.(done, actionable.length, change.vaultPath);
       }
-      done += 1;
-      onProgress?.(done, actionable.length, change.vaultPath);
+    } finally {
+      this.companionIndex = null;
     }
     return result;
   }
@@ -1036,8 +1004,11 @@ var SyncEngine = class {
     const prepared = file.extension.toLowerCase() === "md" ? this.prepareMarkdown(bytes, file.path) : { uploadBytes: bytes, meta: {} };
     const uploadBytes = prepared.uploadBytes;
     let meta = prepared.meta;
-    if (Object.keys(meta).length === 0 && isCompanionPath(file.path, this.getSettings().companionMetadataPaths)) {
-      meta = await this.companionMeta(file);
+    const sourceFolder = change.mapping?.companionSourceFolder;
+    if (Object.keys(meta).length === 0 && sourceFolder) {
+      const found = this.companionIndex?.get(sourceFolder)?.get(file.path);
+      if (found)
+        meta = found;
     }
     const contentType = CONTENT_TYPES[file.extension.toLowerCase()];
     const doc = await this.client.uploadDocument(
@@ -1094,34 +1065,41 @@ var SyncEngine = class {
     };
   }
   /**
-   * Metadata for an attachment, inherited from a same-named ".md" companion
-   * note in the same folder (report.pdf -> report.md). Returns {} when the file
-   * is itself that note, when no companion exists, or when the companion has no
-   * frontmatter — so a missing companion is silently ignored. The companion's
-   * frontmatter is read regardless of whether the companion is itself in scope.
+   * Build the companion-metadata lookup for this apply run. For each distinct
+   * source folder configured on a mapping, scan that folder's notes; whenever a
+   * note's frontmatter links to a file (e.g. `file: "[[report.pdf]]"`), record
+   * that the linked file inherits the note's normalized frontmatter. Keyed by
+   * source folder so an attachment only matches notes from its own mapping's
+   * folder. Frontmatter links come from Obsidian's metadata cache, so pairing is
+   * by the explicit `[[...]]` reference rather than by filename.
    */
-  async companionMeta(file) {
-    const slash = file.path.lastIndexOf("/");
-    const dir = slash >= 0 ? file.path.slice(0, slash + 1) : "";
-    const companionPath = `${dir}${file.basename}.md`;
-    if (companionPath === file.path)
-      return {};
-    const companion = this.app.vault.getAbstractFileByPath(companionPath);
-    if (!(companion instanceof import_obsidian4.TFile))
-      return {};
-    try {
-      const bytes = await this.app.vault.adapter.readBinary(companion.path);
-      const { yaml } = splitFrontmatter(new TextDecoder().decode(bytes));
-      if (yaml === null)
-        return {};
-      return normalizeMeta((0, import_obsidian4.parseYaml)(yaml));
-    } catch (e) {
-      console.error(
-        `RAGFlow Sync: failed to read companion metadata for ${file.path}:`,
-        e
-      );
-      return {};
+  buildCompanionIndex() {
+    const index = /* @__PURE__ */ new Map();
+    const folders = new Set(
+      this.getSettings().datasetMappings.map((m) => m.companionSourceFolder).filter((f) => !!f && f.length > 0)
+    );
+    for (const folder of folders) {
+      const byTarget = /* @__PURE__ */ new Map();
+      const prefix = `${folder}/`;
+      const notes = this.app.vault.getMarkdownFiles().filter((f) => f.path.startsWith(prefix));
+      for (const note of notes) {
+        const cache = this.app.metadataCache.getFileCache(note);
+        const links = cache?.frontmatterLinks;
+        if (!cache?.frontmatter || !links || links.length === 0)
+          continue;
+        const meta = normalizeMeta(cache.frontmatter);
+        for (const link of links) {
+          const dest = this.app.metadataCache.getFirstLinkpathDest(
+            link.link,
+            note.path
+          );
+          if (dest)
+            byTarget.set(dest.path, meta);
+        }
+      }
+      index.set(folder, byTarget);
     }
+    return index;
   }
   /**
    * Outgoing links and backlinks for a note, as titles, from Obsidian's
@@ -1501,9 +1479,6 @@ var RagflowSyncPlugin = class extends import_obsidian6.Plugin {
     const data = await this.loadData() ?? {};
     this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
     this.settings.state = Object.assign({ files: {} }, data.state ?? {});
-    this.settings.companionMetadataPaths = [
-      ...data.companionMetadataPaths ?? []
-    ];
     this.migrateLegacyData(data);
   }
   /**
@@ -1522,10 +1497,8 @@ var RagflowSyncPlugin = class extends import_obsidian6.Plugin {
       }));
     }
     delete this.settings.folderMappings;
+    delete this.settings.companionMetadataPaths;
     for (const mapping of this.settings.datasetMappings) {
-      if (mapping.companionMetadata && !this.settings.companionMetadataPaths.includes(mapping.vaultPath)) {
-        this.settings.companionMetadataPaths.push(mapping.vaultPath);
-      }
       delete mapping.companionMetadata;
     }
     const files = this.settings.state.files;

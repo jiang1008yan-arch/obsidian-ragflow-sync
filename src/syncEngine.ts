@@ -3,7 +3,6 @@ import { RagflowClient } from "./ragflowClient";
 import { SyncStateStore } from "./syncState";
 import { sha256 } from "./hash";
 import { assembleChanges, classifyByStat, finalizeWithHashes } from "./diff";
-import { isCompanionPath } from "./mapping";
 import { internalizeMarkdown, noteTitle } from "./internalize";
 import { normalizeMeta, splitFrontmatter } from "./frontmatter";
 import { normalizeTables } from "./tables";
@@ -62,6 +61,14 @@ export class SyncEngine {
 	private client: RagflowClient;
 	private store: SyncStateStore;
 	private getSettings: () => RagflowSyncSettings;
+	/**
+	 * Per-run companion-metadata lookup, built at the start of applyChanges and
+	 * cleared at the end: source folder -> (linked-file path -> that note's
+	 * frontmatter). Null outside an apply run.
+	 */
+	private companionIndex:
+		| Map<string, Map<string, Record<string, unknown>>>
+		| null = null;
 
 	constructor(
 		app: App,
@@ -155,27 +162,32 @@ export class SyncEngine {
 		let done = 0;
 		const result: ApplyResult = { ok: 0, failed: 0, errors: [] };
 
-		for (const change of actionable) {
-			try {
-				if (change.kind === "new") {
-					await this.syncUpload(change, undefined);
-				} else if (change.kind === "modified") {
-					await this.syncUpload(change, change.record);
-				} else if (change.kind === "deleted") {
-					if (change.record) {
-						await this.client.deleteDocuments(change.record.datasetId, [
-							change.record.documentId,
-						]);
+		this.companionIndex = this.buildCompanionIndex();
+		try {
+			for (const change of actionable) {
+				try {
+					if (change.kind === "new") {
+						await this.syncUpload(change, undefined);
+					} else if (change.kind === "modified") {
+						await this.syncUpload(change, change.record);
+					} else if (change.kind === "deleted") {
+						if (change.record) {
+							await this.client.deleteDocuments(change.record.datasetId, [
+								change.record.documentId,
+							]);
+						}
+						await this.store.deleteFile(change.vaultPath);
 					}
-					await this.store.deleteFile(change.vaultPath);
+					result.ok += 1;
+				} catch (e) {
+					result.failed += 1;
+					result.errors.push(`${change.vaultPath}: ${(e as Error).message}`);
 				}
-				result.ok += 1;
-			} catch (e) {
-				result.failed += 1;
-				result.errors.push(`${change.vaultPath}: ${(e as Error).message}`);
+				done += 1;
+				onProgress?.(done, actionable.length, change.vaultPath);
 			}
-			done += 1;
-			onProgress?.(done, actionable.length, change.vaultPath);
+		} finally {
+			this.companionIndex = null;
 		}
 		return result;
 	}
@@ -213,16 +225,14 @@ export class SyncEngine {
 		const uploadBytes = prepared.uploadBytes;
 		let meta = prepared.meta;
 
-		// Companion metadata (opt-in by path): a file with no metadata of its own
-		// — chiefly an attachment like a PDF — inherits the frontmatter of a
-		// same-named ".md" note beside it, when its path is selected in
-		// companionMetadataPaths. Files that already carry their own metadata, and
-		// files with no companion note, are left as-is.
-		if (
-			Object.keys(meta).length === 0 &&
-			isCompanionPath(file.path, this.getSettings().companionMetadataPaths)
-		) {
-			meta = await this.companionMeta(file);
+		// Companion metadata: a file with no metadata of its own — chiefly an
+		// attachment like a PDF — inherits the frontmatter of a note in the
+		// mapping's source folder that links to it. Files that already carry their
+		// own metadata, and files no source note links to, are left as-is.
+		const sourceFolder = change.mapping?.companionSourceFolder;
+		if (Object.keys(meta).length === 0 && sourceFolder) {
+			const found = this.companionIndex?.get(sourceFolder)?.get(file.path);
+			if (found) meta = found;
 		}
 
 		const contentType = CONTENT_TYPES[file.extension.toLowerCase()];
@@ -293,33 +303,48 @@ export class SyncEngine {
 	}
 
 	/**
-	 * Metadata for an attachment, inherited from a same-named ".md" companion
-	 * note in the same folder (report.pdf -> report.md). Returns {} when the file
-	 * is itself that note, when no companion exists, or when the companion has no
-	 * frontmatter — so a missing companion is silently ignored. The companion's
-	 * frontmatter is read regardless of whether the companion is itself in scope.
+	 * Build the companion-metadata lookup for this apply run. For each distinct
+	 * source folder configured on a mapping, scan that folder's notes; whenever a
+	 * note's frontmatter links to a file (e.g. `file: "[[report.pdf]]"`), record
+	 * that the linked file inherits the note's normalized frontmatter. Keyed by
+	 * source folder so an attachment only matches notes from its own mapping's
+	 * folder. Frontmatter links come from Obsidian's metadata cache, so pairing is
+	 * by the explicit `[[...]]` reference rather than by filename.
 	 */
-	private async companionMeta(file: TFile): Promise<Record<string, unknown>> {
-		const slash = file.path.lastIndexOf("/");
-		const dir = slash >= 0 ? file.path.slice(0, slash + 1) : "";
-		const companionPath = `${dir}${file.basename}.md`;
-		if (companionPath === file.path) return {};
+	private buildCompanionIndex(): Map<
+		string,
+		Map<string, Record<string, unknown>>
+	> {
+		const index = new Map<string, Map<string, Record<string, unknown>>>();
+		const folders = new Set(
+			this.getSettings()
+				.datasetMappings.map((m) => m.companionSourceFolder)
+				.filter((f): f is string => !!f && f.length > 0)
+		);
 
-		const companion = this.app.vault.getAbstractFileByPath(companionPath);
-		if (!(companion instanceof TFile)) return {};
+		for (const folder of folders) {
+			const byTarget = new Map<string, Record<string, unknown>>();
+			const prefix = `${folder}/`;
+			const notes = this.app.vault
+				.getMarkdownFiles()
+				.filter((f) => f.path.startsWith(prefix));
 
-		try {
-			const bytes = await this.app.vault.adapter.readBinary(companion.path);
-			const { yaml } = splitFrontmatter(new TextDecoder().decode(bytes));
-			if (yaml === null) return {};
-			return normalizeMeta(parseYaml(yaml));
-		} catch (e) {
-			console.error(
-				`RAGFlow Sync: failed to read companion metadata for ${file.path}:`,
-				e
-			);
-			return {};
+			for (const note of notes) {
+				const cache = this.app.metadataCache.getFileCache(note);
+				const links = cache?.frontmatterLinks;
+				if (!cache?.frontmatter || !links || links.length === 0) continue;
+				const meta = normalizeMeta(cache.frontmatter);
+				for (const link of links) {
+					const dest = this.app.metadataCache.getFirstLinkpathDest(
+						link.link,
+						note.path
+					);
+					if (dest) byTarget.set(dest.path, meta);
+				}
+			}
+			index.set(folder, byTarget);
 		}
+		return index;
 	}
 
 	/**
