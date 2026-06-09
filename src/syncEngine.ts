@@ -236,7 +236,13 @@ export class SyncEngine {
 		const sourceFolder = change.mapping?.companionSourceFolder;
 		if (Object.keys(meta).length === 0 && sourceFolder) {
 			const found = this.lookupCompanion(sourceFolder, file);
-			if (found) meta = found;
+			if (found) {
+				meta = found;
+			} else {
+				console.warn(
+					`RAGFlow Sync: no companion metadata for "${file.path}" — looked in "${sourceFolder}" by path, name "${file.name.toLowerCase()}", base "${file.basename.toLowerCase()}".`
+				);
+			}
 		}
 
 		const contentType = CONTENT_TYPES[file.extension.toLowerCase()];
@@ -334,17 +340,31 @@ export class SyncEngine {
 				.getMarkdownFiles()
 				.filter((f) => f.path === folder || f.path.startsWith(prefix));
 
+			let notesWithLinks = 0;
+			let targetCount = 0;
 			for (const note of notes) {
 				const fm = this.app.metadataCache.getFileCache(note)?.frontmatter;
 				if (!fm) continue;
 				const targets = frontmatterLinkTargets(fm);
 				if (targets.length === 0) continue;
+				notesWithLinks += 1;
+				targetCount += targets.length;
 				const meta = normalizeMeta(fm);
 				for (const target of targets) {
 					this.indexCompanionTarget(map, note, target, meta);
 				}
 			}
 			index.set(folder, map);
+
+			// Diagnostic: the file names this folder indexed, so an unmatched
+			// upload can be compared against what the source notes actually link to.
+			const names = [...map.keys()]
+				.filter((k) => k.startsWith("name:"))
+				.map((k) => k.slice("name:".length));
+			console.log(
+				`RAGFlow Sync: companion source "${folder}" — ${notes.length} note(s), ${notesWithLinks} with frontmatter links, ${targetCount} link target(s); indexed names:`,
+				names
+			);
 		}
 		return index;
 	}

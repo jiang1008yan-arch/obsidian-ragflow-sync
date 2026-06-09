@@ -1027,8 +1027,13 @@ var SyncEngine = class {
     const sourceFolder = change.mapping?.companionSourceFolder;
     if (Object.keys(meta).length === 0 && sourceFolder) {
       const found = this.lookupCompanion(sourceFolder, file);
-      if (found)
+      if (found) {
         meta = found;
+      } else {
+        console.warn(
+          `RAGFlow Sync: no companion metadata for "${file.path}" \u2014 looked in "${sourceFolder}" by path, name "${file.name.toLowerCase()}", base "${file.basename.toLowerCase()}".`
+        );
+      }
     }
     const contentType = CONTENT_TYPES[file.extension.toLowerCase()];
     const doc = await this.client.uploadDocument(
@@ -1103,6 +1108,8 @@ var SyncEngine = class {
       const map = /* @__PURE__ */ new Map();
       const prefix = `${folder}/`;
       const notes = this.app.vault.getMarkdownFiles().filter((f) => f.path === folder || f.path.startsWith(prefix));
+      let notesWithLinks = 0;
+      let targetCount = 0;
       for (const note of notes) {
         const fm = this.app.metadataCache.getFileCache(note)?.frontmatter;
         if (!fm)
@@ -1110,12 +1117,19 @@ var SyncEngine = class {
         const targets = frontmatterLinkTargets(fm);
         if (targets.length === 0)
           continue;
+        notesWithLinks += 1;
+        targetCount += targets.length;
         const meta = normalizeMeta(fm);
         for (const target of targets) {
           this.indexCompanionTarget(map, note, target, meta);
         }
       }
       index.set(folder, map);
+      const names = [...map.keys()].filter((k) => k.startsWith("name:")).map((k) => k.slice("name:".length));
+      console.log(
+        `RAGFlow Sync: companion source "${folder}" \u2014 ${notes.length} note(s), ${notesWithLinks} with frontmatter links, ${targetCount} link target(s); indexed names:`,
+        names
+      );
     }
     return index;
   }
