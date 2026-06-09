@@ -270,12 +270,15 @@ re-upload once with the new processing — no manual action needed.
 
 If you ever need to rebuild RAGFlow's copies without any change to trigger it
 (for example you deleted some documents on the RAGFlow side, or a few were left
-in a failed parsing state), tick those files in the panel and click
-`Re-sync selected`. Every file in the scan — including ones marked `Up to date`
-— has a checkbox, and each group header has a checkbox that ticks the whole
-group at once. Selected `Up to date` files are re-uploaded as if modified;
-nothing else is touched, so you rebuild only the documents you choose instead of
-re-uploading the entire vault.
+in a failed parsing state), click `Re-sync selected…` in the panel. This switches
+the diff into a selection view where every file — including ones marked
+`Up to date` — gets a checkbox, and each group header has a checkbox that ticks
+the whole group at once. Tick the files you want to rebuild, then click
+`Re-sync selected (N)`. Selected `Up to date` files are re-uploaded as if
+modified; nothing else is touched, so you rebuild only the documents you choose
+instead of re-uploading the entire vault. `Scan diff` (or `Cancel`) returns to
+the plain audit view, which stays checkbox-free — it just reports the diff for
+`Sync all`/`Sync these` to act on automatically.
 
 To rebuild *everything* regardless of the diff result, run
 `RAGFlow Sync: Force re-sync all` from the command palette.
