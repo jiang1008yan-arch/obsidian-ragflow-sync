@@ -241,8 +241,11 @@ folder **whose frontmatter links to it**.
 
 Pairing is by the explicit `[[...]]` link, not by filename — so the note name
 need not match the attachment, which matters when names differ or a note is
-referenced from many places. For example, with a mapping's Companion meta folder
-set to `Index`, a note `Index/anything.md` containing:
+referenced from many places. The link is read straight from the frontmatter text
+and matched against the attachment by resolved path, file name, and
+extension-less base, so it resolves whether the link carries the extension
+(`[[report.pdf]]`) or not (`[[report]]`). For example, with a mapping's Companion
+meta folder set to `Index`, a note `Index/anything.md` containing:
 
 ```yaml
 ---

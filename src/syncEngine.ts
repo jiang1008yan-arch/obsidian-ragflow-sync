@@ -4,7 +4,11 @@ import { SyncStateStore } from "./syncState";
 import { sha256 } from "./hash";
 import { assembleChanges, classifyByStat, finalizeWithHashes } from "./diff";
 import { internalizeMarkdown, noteTitle } from "./internalize";
-import { normalizeMeta, splitFrontmatter } from "./frontmatter";
+import {
+	frontmatterLinkTargets,
+	normalizeMeta,
+	splitFrontmatter,
+} from "./frontmatter";
 import { normalizeTables } from "./tables";
 import {
 	ChangeKind,
@@ -231,7 +235,7 @@ export class SyncEngine {
 		// own metadata, and files no source note links to, are left as-is.
 		const sourceFolder = change.mapping?.companionSourceFolder;
 		if (Object.keys(meta).length === 0 && sourceFolder) {
-			const found = this.companionIndex?.get(sourceFolder)?.get(file.path);
+			const found = this.lookupCompanion(sourceFolder, file);
 			if (found) meta = found;
 		}
 
@@ -308,8 +312,9 @@ export class SyncEngine {
 	 * note's frontmatter links to a file (e.g. `file: "[[report.pdf]]"`), record
 	 * that the linked file inherits the note's normalized frontmatter. Keyed by
 	 * source folder so an attachment only matches notes from its own mapping's
-	 * folder. Frontmatter links come from Obsidian's metadata cache, so pairing is
-	 * by the explicit `[[...]]` reference rather than by filename.
+	 * folder. The link target is read straight from the frontmatter text and
+	 * indexed under several keys (see indexCompanionTarget) so resolution survives
+	 * a link that carries an extension, omits one, or does not resolve uniquely.
 	 */
 	private buildCompanionIndex(): Map<
 		string,
@@ -323,28 +328,66 @@ export class SyncEngine {
 		);
 
 		for (const folder of folders) {
-			const byTarget = new Map<string, Record<string, unknown>>();
+			const map = new Map<string, Record<string, unknown>>();
 			const prefix = `${folder}/`;
 			const notes = this.app.vault
 				.getMarkdownFiles()
-				.filter((f) => f.path.startsWith(prefix));
+				.filter((f) => f.path === folder || f.path.startsWith(prefix));
 
 			for (const note of notes) {
-				const cache = this.app.metadataCache.getFileCache(note);
-				const links = cache?.frontmatterLinks;
-				if (!cache?.frontmatter || !links || links.length === 0) continue;
-				const meta = normalizeMeta(cache.frontmatter);
-				for (const link of links) {
-					const dest = this.app.metadataCache.getFirstLinkpathDest(
-						link.link,
-						note.path
-					);
-					if (dest) byTarget.set(dest.path, meta);
+				const fm = this.app.metadataCache.getFileCache(note)?.frontmatter;
+				if (!fm) continue;
+				const targets = frontmatterLinkTargets(fm);
+				if (targets.length === 0) continue;
+				const meta = normalizeMeta(fm);
+				for (const target of targets) {
+					this.indexCompanionTarget(map, note, target, meta);
 				}
 			}
-			index.set(folder, byTarget);
+			index.set(folder, map);
 		}
 		return index;
+	}
+
+	/**
+	 * Record a companion match under every key a later upload might look it up by,
+	 * so a link survives whether or not it carries an extension and whether or not
+	 * it resolves to a unique vault path: the resolved path (when Obsidian can
+	 * resolve it), plus the link's file name and its extension-less base, both
+	 * lower-cased and prefixed so the key spaces never collide.
+	 */
+	private indexCompanionTarget(
+		map: Map<string, Record<string, unknown>>,
+		note: TFile,
+		linkpath: string,
+		meta: Record<string, unknown>
+	): void {
+		const dest = this.app.metadataCache.getFirstLinkpathDest(
+			linkpath,
+			note.path
+		);
+		if (dest) map.set(dest.path, meta);
+
+		const name = (linkpath.split("/").pop() ?? linkpath).trim();
+		if (!name) return;
+		map.set(`name:${name.toLowerCase()}`, meta);
+		const dot = name.lastIndexOf(".");
+		const base = dot > 0 ? name.slice(0, dot) : name;
+		map.set(`base:${base.toLowerCase()}`, meta);
+	}
+
+	/** A file's companion metadata: by resolved path, then file name, then base. */
+	private lookupCompanion(
+		sourceFolder: string,
+		file: TFile
+	): Record<string, unknown> | undefined {
+		const map = this.companionIndex?.get(sourceFolder);
+		if (!map) return undefined;
+		return (
+			map.get(file.path) ??
+			map.get(`name:${file.name.toLowerCase()}`) ??
+			map.get(`base:${file.basename.toLowerCase()}`)
+		);
 	}
 
 	/**
