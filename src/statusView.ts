@@ -18,6 +18,10 @@ export class RagflowSyncView extends ItemView {
 	private changes: FileChange[] = [];
 	private statusEl: HTMLElement | null = null;
 	private busy = false;
+	/** Vault paths the user has ticked for a manual re-upload. */
+	private selected: Set<string> = new Set();
+	/** The "Re-sync selected" button, kept so its label can update live. */
+	private resyncBtn: HTMLButtonElement | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: RagflowSyncPlugin) {
 		super(leaf);
@@ -59,6 +63,8 @@ export class RagflowSyncView extends ItemView {
 		try {
 			const result = await this.plugin.engine.computeDiff();
 			this.changes = result.changes;
+			// A fresh scan invalidates any prior tick state.
+			this.selected.clear();
 			if (result.missingMappings.length > 0) {
 				new Notice(
 					`Some mapped folders were not found: ${result.missingMappings
@@ -84,9 +90,30 @@ export class RagflowSyncView extends ItemView {
 	}
 
 	/**
+	 * Re-upload exactly the files the user ticked, regardless of diff result.
+	 * An "unchanged" pick is promoted to "modified" (hash cleared) so the upload
+	 * step rebuilds RAGFlow's copy from the current source; a "deleted" pick
+	 * stays a deletion. Use to rebuild specific documents — e.g. ones removed or
+	 * left in a failed state on the RAGFlow side — without re-uploading the rest.
+	 */
+	async syncSelected(): Promise<void> {
+		const picks = this.changes.filter((c) => this.selected.has(c.vaultPath));
+		if (picks.length === 0) {
+			new Notice("No files selected. Tick the files you want to re-upload.");
+			return;
+		}
+		const forced = picks.map((c) =>
+			c.kind === "unchanged"
+				? { ...c, kind: "modified" as ChangeKind, hash: undefined }
+				: c
+		);
+		await this.syncChanges(forced);
+	}
+
+	/**
 	 * Re-upload every in-scope file regardless of diff result, by promoting
-	 * "unchanged" entries to "modified". Use when RAGFlow's copies must be
-	 * rebuilt without a content or processing-version change to trigger it.
+	 * "unchanged" entries to "modified". The command-palette "force re-sync"
+	 * escape hatch; the panel offers per-file selection instead.
 	 */
 	async forceSyncAll(): Promise<void> {
 		const forced = this.changes.map((c) =>
@@ -140,8 +167,8 @@ export class RagflowSyncView extends ItemView {
 		syncAllBtn.addClass("mod-cta");
 		syncAllBtn.onclick = () => void this.syncChanges(this.changes);
 
-		const forceBtn = toolbar.createEl("button", { text: "Force re-sync all" });
-		forceBtn.onclick = () => void this.forceSyncAll();
+		this.resyncBtn = toolbar.createEl("button", { text: "Re-sync selected" });
+		this.resyncBtn.onclick = () => void this.syncSelected();
 
 		this.statusEl = container.createDiv({ cls: "ragflow-sync-status" });
 
@@ -150,6 +177,7 @@ export class RagflowSyncView extends ItemView {
 				cls: "ragflow-sync-empty",
 				text: 'No scan results yet. Click "Scan diff" to compare your vault with RAGFlow.',
 			});
+			this.updateSelectionUi();
 			return;
 		}
 
@@ -163,7 +191,22 @@ export class RagflowSyncView extends ItemView {
 
 			const group = container.createDiv({ cls: "ragflow-sync-group" });
 			const header = group.createDiv({ cls: "ragflow-sync-group-header" });
-			header.createSpan({ text: `${KIND_LABEL[kind]} (${list.length})` });
+
+			// Group-level "select all": tick every file in this group at once.
+			const groupToggle = header.createEl("label", {
+				cls: "ragflow-sync-group-toggle",
+			});
+			const allTicked = list.every((c) => this.selected.has(c.vaultPath));
+			const groupBox = groupToggle.createEl("input", { type: "checkbox" });
+			groupBox.checked = allTicked;
+			groupBox.onchange = () => {
+				for (const c of list) {
+					if (groupBox.checked) this.selected.add(c.vaultPath);
+					else this.selected.delete(c.vaultPath);
+				}
+				this.render();
+			};
+			groupToggle.createSpan({ text: `${KIND_LABEL[kind]} (${list.length})` });
 
 			if (kind !== "unchanged") {
 				const btn = header.createEl("button", { text: "Sync these" });
@@ -172,15 +215,38 @@ export class RagflowSyncView extends ItemView {
 
 			for (const change of list) {
 				const item = group.createDiv({ cls: "ragflow-sync-item" });
-				item.createDiv({
+
+				const main = item.createDiv({ cls: "ragflow-sync-item-main" });
+				const box = main.createEl("input", { type: "checkbox" });
+				box.checked = this.selected.has(change.vaultPath);
+				box.onchange = () => {
+					if (box.checked) this.selected.add(change.vaultPath);
+					else this.selected.delete(change.vaultPath);
+					this.updateSelectionUi();
+				};
+				main.createDiv({
 					cls: "ragflow-sync-item-path",
 					text: change.vaultPath,
 				});
+
 				item.createSpan({
 					cls: `ragflow-sync-badge ${kind}`,
 					text: KIND_LABEL[kind],
 				});
 			}
 		}
+
+		this.updateSelectionUi();
+	}
+
+	/** Reflect the current tick count on the "Re-sync selected" button. */
+	private updateSelectionUi(): void {
+		if (!this.resyncBtn) return;
+		const n = this.selected.size;
+		this.resyncBtn.setText(
+			n > 0 ? `Re-sync selected (${n})` : "Re-sync selected"
+		);
+		this.resyncBtn.toggleClass("mod-warning", n > 0);
+		this.resyncBtn.disabled = n === 0;
 	}
 }

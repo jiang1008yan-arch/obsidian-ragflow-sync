@@ -19,6 +19,13 @@
 	border-bottom: 1px solid var(--background-modifier-border);
 }
 
+.ragflow-sync-view .ragflow-sync-group-toggle {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	cursor: pointer;
+}
+
 .ragflow-sync-view .ragflow-sync-item {
 	display: flex;
 	align-items: center;
@@ -26,6 +33,19 @@
 	gap: 8px;
 	padding: 2px 0;
 	font-size: var(--font-ui-small);
+}
+
+.ragflow-sync-view .ragflow-sync-item-main {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	min-width: 0;
+	flex: 1;
+}
+
+.ragflow-sync-view .ragflow-sync-item-main input[type="checkbox"] {
+	flex-shrink: 0;
+	cursor: pointer;
 }
 
 .ragflow-sync-view .ragflow-sync-item-path {
