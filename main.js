@@ -1075,6 +1075,12 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
     this.busy = false;
     /** Vault paths the user has ticked for a manual re-upload. */
     this.selected = /* @__PURE__ */ new Set();
+    /**
+     * Selection mode is the manual re-upload flow: only here do per-file
+     * checkboxes appear. The default (audit) view stays checkbox-free — Scan diff
+     * just reports the diff and Sync all/Sync these act on it automatically.
+     */
+    this.selectionMode = false;
     /** The "Re-sync selected" button, kept so its label can update live. */
     this.resyncBtn = null;
     this.plugin = plugin;
@@ -1110,6 +1116,7 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
       const result = await this.plugin.engine.computeDiff();
       this.changes = result.changes;
       this.selected.clear();
+      this.selectionMode = false;
       if (result.missingMappings.length > 0) {
         new import_obsidian5.Notice(
           `Some mapped folders were not found: ${result.missingMappings.map((m) => m.vaultPath).join(", ")}`
@@ -1193,21 +1200,15 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
     const container = this.containerEl.children[1];
     container.empty();
     container.addClass("ragflow-sync-view");
+    this.resyncBtn = null;
     const toolbar = container.createDiv({ cls: "ragflow-sync-toolbar" });
-    const scanBtn = toolbar.createEl("button", { text: "Scan diff" });
-    scanBtn.onclick = () => void this.scan();
-    const syncAllBtn = toolbar.createEl("button", { text: "Sync all" });
-    syncAllBtn.addClass("mod-cta");
-    syncAllBtn.onclick = () => void this.syncChanges(this.changes);
-    this.resyncBtn = toolbar.createEl("button", { text: "Re-sync selected" });
-    this.resyncBtn.onclick = () => void this.syncSelected();
+    this.renderToolbar(toolbar);
     this.statusEl = container.createDiv({ cls: "ragflow-sync-status" });
     if (this.changes.length === 0) {
       container.createDiv({
         cls: "ragflow-sync-empty",
         text: 'No scan results yet. Click "Scan diff" to compare your vault with RAGFlow.'
       });
-      this.updateSelectionUi();
       return;
     }
     const byKind = /* @__PURE__ */ new Map();
@@ -1217,16 +1218,55 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
       byKind.get(change.kind).push(change);
     for (const kind of KIND_ORDER) {
       const list = byKind.get(kind);
-      if (list.length === 0)
-        continue;
-      const group = container.createDiv({ cls: "ragflow-sync-group" });
-      const header = group.createDiv({ cls: "ragflow-sync-group-header" });
+      if (list.length > 0)
+        this.renderGroup(container, kind, list);
+    }
+    this.updateSelectionUi();
+  }
+  /**
+   * The toolbar differs by mode. Audit (default): Scan diff, Sync all, and an
+   * entry into selection mode. Selection: confirm the ticked re-sync, or cancel
+   * back to the audit view.
+   */
+  renderToolbar(toolbar) {
+    const scanBtn = toolbar.createEl("button", { text: "Scan diff" });
+    scanBtn.onclick = () => void this.scan();
+    if (this.selectionMode) {
+      this.resyncBtn = toolbar.createEl("button", {
+        text: "Re-sync selected"
+      });
+      this.resyncBtn.onclick = () => void this.syncSelected();
+      const cancelBtn = toolbar.createEl("button", { text: "Cancel" });
+      cancelBtn.onclick = () => {
+        this.selectionMode = false;
+        this.selected.clear();
+        this.render();
+      };
+      return;
+    }
+    const syncAllBtn = toolbar.createEl("button", { text: "Sync all" });
+    syncAllBtn.addClass("mod-cta");
+    syncAllBtn.onclick = () => void this.syncChanges(this.changes);
+    if (this.changes.length > 0) {
+      const selectBtn = toolbar.createEl("button", {
+        text: "Re-sync selected\u2026"
+      });
+      selectBtn.onclick = () => {
+        this.selectionMode = true;
+        this.selected.clear();
+        this.render();
+      };
+    }
+  }
+  renderGroup(container, kind, list) {
+    const group = container.createDiv({ cls: "ragflow-sync-group" });
+    const header = group.createDiv({ cls: "ragflow-sync-group-header" });
+    if (this.selectionMode) {
       const groupToggle = header.createEl("label", {
         cls: "ragflow-sync-group-toggle"
       });
-      const allTicked = list.every((c) => this.selected.has(c.vaultPath));
       const groupBox = groupToggle.createEl("input", { type: "checkbox" });
-      groupBox.checked = allTicked;
+      groupBox.checked = list.every((c) => this.selected.has(c.vaultPath));
       groupBox.onchange = () => {
         for (const c of list) {
           if (groupBox.checked)
@@ -1237,13 +1277,17 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
         this.render();
       };
       groupToggle.createSpan({ text: `${KIND_LABEL[kind]} (${list.length})` });
+    } else {
+      header.createSpan({ text: `${KIND_LABEL[kind]} (${list.length})` });
       if (kind !== "unchanged") {
         const btn = header.createEl("button", { text: "Sync these" });
         btn.onclick = () => void this.syncChanges(list);
       }
-      for (const change of list) {
-        const item = group.createDiv({ cls: "ragflow-sync-item" });
-        const main = item.createDiv({ cls: "ragflow-sync-item-main" });
+    }
+    for (const change of list) {
+      const item = group.createDiv({ cls: "ragflow-sync-item" });
+      const main = item.createDiv({ cls: "ragflow-sync-item-main" });
+      if (this.selectionMode) {
         const box = main.createEl("input", { type: "checkbox" });
         box.checked = this.selected.has(change.vaultPath);
         box.onchange = () => {
@@ -1253,17 +1297,16 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
             this.selected.delete(change.vaultPath);
           this.updateSelectionUi();
         };
-        main.createDiv({
-          cls: "ragflow-sync-item-path",
-          text: change.vaultPath
-        });
-        item.createSpan({
-          cls: `ragflow-sync-badge ${kind}`,
-          text: KIND_LABEL[kind]
-        });
       }
+      main.createDiv({
+        cls: "ragflow-sync-item-path",
+        text: change.vaultPath
+      });
+      item.createSpan({
+        cls: `ragflow-sync-badge ${kind}`,
+        text: KIND_LABEL[kind]
+      });
     }
-    this.updateSelectionUi();
   }
   /** Reflect the current tick count on the "Re-sync selected" button. */
   updateSelectionUi() {
