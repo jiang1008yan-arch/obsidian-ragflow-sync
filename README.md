@@ -231,6 +231,28 @@ alias like `"[[B|the B note]]"` becomes `"the B note"`, and lists or nested
 mappings are cleaned recursively. This applies unconditionally and is
 independent of the body link-internalization option below.
 
+#### Companion Metadata For Attachments
+
+Attachments such as PDFs have no frontmatter of their own, so by default they
+upload without any metadata. Tick **Companion meta** on a dataset mapping to
+fill that gap: any file under that mapping that carries no metadata of its own
+inherits the frontmatter of a same-named `.md` note in the same folder. For
+example, with the option on, `Papers/report.pdf` takes its RAGFlow metadata from
+`Papers/report.md`.
+
+This is deliberately separate from the always-on "a note's own frontmatter
+becomes its own metadata" behavior above, so the two never mix:
+
+- A file that already has its own metadata (a Markdown note with frontmatter) is
+  left to the always-on behavior; the companion lookup is skipped.
+- A file with no companion note beside it is uploaded without metadata — the
+  option simply does nothing for it.
+
+The companion note is read only for its frontmatter; it is still uploaded as its
+own document in the usual way (it does not need to be excluded from scope). The
+option is off by default and set per mapping, so you choose exactly which folders
+use it.
+
 ## Use The Plugin
 
 There are three ways to open or run sync actions:

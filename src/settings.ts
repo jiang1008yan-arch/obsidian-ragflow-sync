@@ -168,7 +168,7 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 
 		containerEl.createEl("h2", { text: "Dataset mappings" });
 		containerEl.createEl("p", {
-			text: "Map a vault folder to a target RAGFlow dataset (knowledge base). Every in-scope file under the folder is uploaded directly into that dataset; the note's YAML frontmatter is stripped from the upload and set as the document's RAGFlow metadata instead. Click a field to pick from existing datasets (they load after a successful Test connection); you can also type a new dataset name and it will be created on sync.",
+			text: "Map a vault folder to a target RAGFlow dataset (knowledge base). Every in-scope file under the folder is uploaded directly into that dataset; the note's YAML frontmatter is stripped from the upload and set as the document's RAGFlow metadata instead. Click a field to pick from existing datasets (they load after a successful Test connection); you can also type a new dataset name and it will be created on sync. Tick \"Companion meta\" to also give metadata-less files (e.g. PDFs) the frontmatter of a same-named .md note beside them.",
 			cls: "setting-item-description",
 		});
 
@@ -235,6 +235,22 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 				() => this.ragflowDatasets,
 				(value) => void setDataset(value)
 			);
+
+			// Per-mapping opt-in: attachments under this folder inherit metadata
+			// from a same-named ".md" companion note. Distinct from the always-on
+			// "a note's own frontmatter is its own metadata" behavior.
+			const metaLabel = row.createEl("label", {
+				cls: "ragflow-mapping-meta",
+			});
+			metaLabel.title =
+				"Companion metadata: files here with no frontmatter of their own (e.g. PDFs) take the frontmatter of a same-named .md note in the same folder as their RAGFlow metadata. Files that already have metadata, or have no companion note, are left untouched.";
+			const metaBox = metaLabel.createEl("input", { type: "checkbox" });
+			metaBox.checked = !!mapping.companionMetadata;
+			metaBox.addEventListener("change", async () => {
+				mapping.companionMetadata = metaBox.checked;
+				await this.plugin.saveSettings();
+			});
+			metaLabel.createSpan({ text: "Companion meta" });
 
 			const removeBtn = row.createEl("button", { text: "✕" });
 			removeBtn.style.flex = "0 0 auto";
