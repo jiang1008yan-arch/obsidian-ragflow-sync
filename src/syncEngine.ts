@@ -205,10 +205,23 @@ export class SyncEngine {
 		// Change detection always hashes the raw source above; the Markdown
 		// transform (frontmatter strip + optional link internalization) only
 		// rewrites the bytes we hand to RAGFlow — the vault file is untouched.
-		const { uploadBytes, meta } =
+		const prepared =
 			file.extension.toLowerCase() === "md"
 				? this.prepareMarkdown(bytes, file.path)
-				: { uploadBytes: bytes, meta: {} };
+				: { uploadBytes: bytes, meta: {} as Record<string, unknown> };
+		const uploadBytes = prepared.uploadBytes;
+		let meta = prepared.meta;
+
+		// Companion metadata (opt-in per mapping): a file with no metadata of its
+		// own — chiefly an attachment like a PDF — inherits the frontmatter of a
+		// same-named ".md" note beside it. Files that already carry their own
+		// metadata, and files with no companion note, are left as-is.
+		if (
+			change.mapping?.companionMetadata &&
+			Object.keys(meta).length === 0
+		) {
+			meta = await this.companionMeta(file);
+		}
 
 		const contentType = CONTENT_TYPES[file.extension.toLowerCase()];
 		const doc = await this.client.uploadDocument(
@@ -275,6 +288,36 @@ export class SyncEngine {
 			uploadBytes: new TextEncoder().encode(transformed).buffer,
 			meta,
 		};
+	}
+
+	/**
+	 * Metadata for an attachment, inherited from a same-named ".md" companion
+	 * note in the same folder (report.pdf -> report.md). Returns {} when the file
+	 * is itself that note, when no companion exists, or when the companion has no
+	 * frontmatter — so a missing companion is silently ignored. The companion's
+	 * frontmatter is read regardless of whether the companion is itself in scope.
+	 */
+	private async companionMeta(file: TFile): Promise<Record<string, unknown>> {
+		const slash = file.path.lastIndexOf("/");
+		const dir = slash >= 0 ? file.path.slice(0, slash + 1) : "";
+		const companionPath = `${dir}${file.basename}.md`;
+		if (companionPath === file.path) return {};
+
+		const companion = this.app.vault.getAbstractFileByPath(companionPath);
+		if (!(companion instanceof TFile)) return {};
+
+		try {
+			const bytes = await this.app.vault.adapter.readBinary(companion.path);
+			const { yaml } = splitFrontmatter(new TextDecoder().decode(bytes));
+			if (yaml === null) return {};
+			return normalizeMeta(parseYaml(yaml));
+		} catch (e) {
+			console.error(
+				`RAGFlow Sync: failed to read companion metadata for ${file.path}:`,
+				e
+			);
+			return {};
+		}
 	}
 
 	/**

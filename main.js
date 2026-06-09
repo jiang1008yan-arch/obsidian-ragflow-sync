@@ -156,7 +156,7 @@ var RagflowSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
     );
     containerEl.createEl("h2", { text: "Dataset mappings" });
     containerEl.createEl("p", {
-      text: "Map a vault folder to a target RAGFlow dataset (knowledge base). Every in-scope file under the folder is uploaded directly into that dataset; the note's YAML frontmatter is stripped from the upload and set as the document's RAGFlow metadata instead. Click a field to pick from existing datasets (they load after a successful Test connection); you can also type a new dataset name and it will be created on sync.",
+      text: `Map a vault folder to a target RAGFlow dataset (knowledge base). Every in-scope file under the folder is uploaded directly into that dataset; the note's YAML frontmatter is stripped from the upload and set as the document's RAGFlow metadata instead. Click a field to pick from existing datasets (they load after a successful Test connection); you can also type a new dataset name and it will be created on sync. Tick "Companion meta" to also give metadata-less files (e.g. PDFs) the frontmatter of a same-named .md note beside them.`,
       cls: "setting-item-description"
     });
     const listEl = containerEl.createDiv();
@@ -214,6 +214,17 @@ var RagflowSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
         () => this.ragflowDatasets,
         (value) => void setDataset(value)
       );
+      const metaLabel = row.createEl("label", {
+        cls: "ragflow-mapping-meta"
+      });
+      metaLabel.title = "Companion metadata: files here with no frontmatter of their own (e.g. PDFs) take the frontmatter of a same-named .md note in the same folder as their RAGFlow metadata. Files that already have metadata, or have no companion note, are left untouched.";
+      const metaBox = metaLabel.createEl("input", { type: "checkbox" });
+      metaBox.checked = !!mapping.companionMetadata;
+      metaBox.addEventListener("change", async () => {
+        mapping.companionMetadata = metaBox.checked;
+        await this.plugin.saveSettings();
+      });
+      metaLabel.createSpan({ text: "Companion meta" });
       const removeBtn = row.createEl("button", { text: "\u2715" });
       removeBtn.style.flex = "0 0 auto";
       removeBtn.addEventListener("click", async () => {
@@ -972,7 +983,12 @@ var SyncEngine = class {
       } catch (_e) {
       }
     }
-    const { uploadBytes, meta } = file.extension.toLowerCase() === "md" ? this.prepareMarkdown(bytes, file.path) : { uploadBytes: bytes, meta: {} };
+    const prepared = file.extension.toLowerCase() === "md" ? this.prepareMarkdown(bytes, file.path) : { uploadBytes: bytes, meta: {} };
+    const uploadBytes = prepared.uploadBytes;
+    let meta = prepared.meta;
+    if (change.mapping?.companionMetadata && Object.keys(meta).length === 0) {
+      meta = await this.companionMeta(file);
+    }
     const contentType = CONTENT_TYPES[file.extension.toLowerCase()];
     const doc = await this.client.uploadDocument(
       datasetId,
@@ -1026,6 +1042,36 @@ var SyncEngine = class {
       uploadBytes: new TextEncoder().encode(transformed).buffer,
       meta
     };
+  }
+  /**
+   * Metadata for an attachment, inherited from a same-named ".md" companion
+   * note in the same folder (report.pdf -> report.md). Returns {} when the file
+   * is itself that note, when no companion exists, or when the companion has no
+   * frontmatter — so a missing companion is silently ignored. The companion's
+   * frontmatter is read regardless of whether the companion is itself in scope.
+   */
+  async companionMeta(file) {
+    const slash = file.path.lastIndexOf("/");
+    const dir = slash >= 0 ? file.path.slice(0, slash + 1) : "";
+    const companionPath = `${dir}${file.basename}.md`;
+    if (companionPath === file.path)
+      return {};
+    const companion = this.app.vault.getAbstractFileByPath(companionPath);
+    if (!(companion instanceof import_obsidian4.TFile))
+      return {};
+    try {
+      const bytes = await this.app.vault.adapter.readBinary(companion.path);
+      const { yaml } = splitFrontmatter(new TextDecoder().decode(bytes));
+      if (yaml === null)
+        return {};
+      return normalizeMeta((0, import_obsidian4.parseYaml)(yaml));
+    } catch (e) {
+      console.error(
+        `RAGFlow Sync: failed to read companion metadata for ${file.path}:`,
+        e
+      );
+      return {};
+    }
   }
   /**
    * Outgoing links and backlinks for a note, as titles, from Obsidian's

@@ -102,3 +102,19 @@
 .ragflow-mapping-row input {
 	flex: 1;
 }
+
+.ragflow-mapping-row .ragflow-mapping-meta {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+	flex: 0 0 auto;
+	white-space: nowrap;
+	font-size: var(--font-ui-smaller);
+	color: var(--text-muted);
+	cursor: pointer;
+}
+
+.ragflow-mapping-row .ragflow-mapping-meta input {
+	flex: 0 0 auto;
+	cursor: pointer;
+}
