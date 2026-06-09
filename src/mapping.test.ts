@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { extensionOf, isInScope, owningMapping } from "./mapping";
+import {
+	extensionOf,
+	isCompanionPath,
+	isInScope,
+	owningMapping,
+} from "./mapping";
 import { DatasetMapping, ScopeConfig } from "./types";
 
 const mapping = (vaultPath: string, datasetName = "ds"): DatasetMapping => ({
@@ -36,6 +41,25 @@ describe("owningMapping", () => {
 	it("treats an empty vaultPath mapping as whole-vault", () => {
 		const s = scope({ mappings: [mapping("")] });
 		expect(owningMapping("anything/x.md", s)?.vaultPath).toBe("");
+	});
+});
+
+describe("isCompanionPath", () => {
+	it("matches a file that sits under a listed folder", () => {
+		expect(isCompanionPath("Papers/report.pdf", ["Papers"])).toBe(true);
+		expect(isCompanionPath("Papers/Sub/report.pdf", ["Papers"])).toBe(true);
+	});
+	it("matches an exact file entry", () => {
+		expect(isCompanionPath("Papers/report.pdf", ["Papers/report.pdf"])).toBe(
+			true
+		);
+	});
+	it("does not match a sibling folder by prefix", () => {
+		expect(isCompanionPath("PapersX/a.pdf", ["Papers"])).toBe(false);
+	});
+	it("ignores empty entries so a blank row selects nothing", () => {
+		expect(isCompanionPath("Papers/report.pdf", [""])).toBe(false);
+		expect(isCompanionPath("Papers/report.pdf", [])).toBe(false);
 	});
 });
 

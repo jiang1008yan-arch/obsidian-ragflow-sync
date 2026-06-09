@@ -4,7 +4,7 @@ import { RagflowClient } from "./ragflowClient";
 import { SyncStateStore } from "./syncState";
 import { SyncEngine } from "./syncEngine";
 import { RagflowSyncView, VIEW_TYPE_RAGFLOW_SYNC } from "./statusView";
-import { RagflowSyncSettings } from "./types";
+import { DatasetMapping, RagflowSyncSettings } from "./types";
 
 export default class RagflowSyncPlugin extends Plugin {
 	settings!: RagflowSyncSettings;
@@ -106,6 +106,11 @@ export default class RagflowSyncPlugin extends Plugin {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
 		// Ensure nested state object exists and is well-formed.
 		this.settings.state = Object.assign({ files: {} }, data.state ?? {});
+		// Own the array rather than sharing DEFAULT_SETTINGS' reference, so edits
+		// (and the migration below) never mutate the defaults.
+		this.settings.companionMetadataPaths = [
+			...(data.companionMetadataPaths ?? []),
+		];
 		this.migrateLegacyData(data);
 	}
 
@@ -127,6 +132,21 @@ export default class RagflowSyncPlugin extends Plugin {
 			}));
 		}
 		delete (this.settings as unknown as Record<string, unknown>).folderMappings;
+
+		// The per-mapping `companionMetadata` flag was replaced by the path-based
+		// `companionMetadataPaths` list. Carry any enabled mappings over, then drop
+		// the obsolete flag from each mapping.
+		for (const mapping of this.settings.datasetMappings as Array<
+			DatasetMapping & { companionMetadata?: boolean }
+		>) {
+			if (
+				mapping.companionMetadata &&
+				!this.settings.companionMetadataPaths.includes(mapping.vaultPath)
+			) {
+				this.settings.companionMetadataPaths.push(mapping.vaultPath);
+			}
+			delete mapping.companionMetadata;
+		}
 
 		const files = this.settings.state.files;
 		const isLegacyRecord = Object.values(files).some(

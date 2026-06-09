@@ -234,11 +234,15 @@ independent of the body link-internalization option below.
 #### Companion Metadata For Attachments
 
 Attachments such as PDFs have no frontmatter of their own, so by default they
-upload without any metadata. Tick **Companion meta** on a dataset mapping to
-fill that gap: any file under that mapping that carries no metadata of its own
-inherits the frontmatter of a same-named `.md` note in the same folder. For
-example, with the option on, `Papers/report.pdf` takes its RAGFlow metadata from
-`Papers/report.md`.
+upload without any metadata. The **Companion metadata** settings section closes
+that gap: add the vault folders and individual files whose metadata-less uploads
+should inherit the frontmatter of a same-named `.md` note beside them. For
+example, with `Papers` (or just `Papers/report.pdf`) listed, `Papers/report.pdf`
+takes its RAGFlow metadata from `Papers/report.md`.
+
+A file qualifies when its path equals, or sits under, a listed entry, so you
+choose exactly which files and folders use the feature rather than toggling
+whole mappings. Leave the list empty to turn it off.
 
 This is deliberately separate from the always-on "a note's own frontmatter
 becomes its own metadata" behavior above, so the two never mix:
@@ -249,9 +253,7 @@ becomes its own metadata" behavior above, so the two never mix:
   option simply does nothing for it.
 
 The companion note is read only for its frontmatter; it is still uploaded as its
-own document in the usual way (it does not need to be excluded from scope). The
-option is off by default and set per mapping, so you choose exactly which folders
-use it.
+own document in the usual way (it does not need to be excluded from scope).
 
 ## Use The Plugin
 
