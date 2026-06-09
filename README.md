@@ -269,9 +269,16 @@ it, your already-synced notes show up as `Modified` on the next `Scan diff` and
 re-upload once with the new processing — no manual action needed.
 
 If you ever need to rebuild RAGFlow's copies without any change to trigger it
-(for example you deleted documents on the RAGFlow side), use `Force re-sync all`
-in the panel, or run `RAGFlow Sync: Force re-sync all` from the command palette.
-This re-uploads every in-scope file regardless of the diff result.
+(for example you deleted some documents on the RAGFlow side, or a few were left
+in a failed parsing state), tick those files in the panel and click
+`Re-sync selected`. Every file in the scan — including ones marked `Up to date`
+— has a checkbox, and each group header has a checkbox that ticks the whole
+group at once. Selected `Up to date` files are re-uploaded as if modified;
+nothing else is touched, so you rebuild only the documents you choose instead of
+re-uploading the entire vault.
+
+To rebuild *everything* regardless of the diff result, run
+`RAGFlow Sync: Force re-sync all` from the command palette.
 
 ## How Sync Works
 
