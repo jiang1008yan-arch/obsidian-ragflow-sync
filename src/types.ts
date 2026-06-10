@@ -56,6 +56,12 @@ export interface SyncedFileRecord {
 	 * versioning existed, which forces a one-time re-sync.
 	 */
 	processingVersion?: number;
+	/**
+	 * Set when the document uploaded fine but the follow-up metadata call was
+	 * rejected by RAGFlow. The next scan re-uploads the file to retry the
+	 * metadata instead of treating it as unchanged; cleared on success.
+	 */
+	metaPending?: boolean;
 }
 
 export interface SyncState {

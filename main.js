@@ -549,6 +549,8 @@ function classifyByStat(snapshot, state, scope) {
       result.news.push({ entry, mapping });
     } else if (record.processingVersion !== scope.processingVersion) {
       result.reprocess.push({ entry, record, mapping });
+    } else if (record.metaPending) {
+      result.reprocess.push({ entry, record, mapping });
     } else if (record.size === entry.size && record.mtime === entry.mtime) {
       result.unchanged.push({ entry, record, mapping });
     } else {
@@ -1003,7 +1005,7 @@ var SyncEngine = class {
     const actionable = changes.filter((c) => c.kind !== "unchanged");
     let done = 0;
     const result = { ok: 0, failed: 0, errors: [] };
-    this.companionIndex = this.buildCompanionIndex();
+    this.companionIndex = await this.buildCompanionIndex();
     try {
       for (const change of actionable) {
         try {
@@ -1054,8 +1056,13 @@ var SyncEngine = class {
     const sourceFolder = change.mapping?.companionSourceFolder;
     if (Object.keys(meta).length === 0 && sourceFolder) {
       const found = this.lookupCompanion(sourceFolder, file);
-      if (found)
+      if (found) {
         meta = found;
+      } else {
+        console.warn(
+          `RAGFlow Sync: no companion metadata for ${change.vaultPath} \u2014 no note in "${sourceFolder}" has a frontmatter link to it, so the document is uploaded without metadata.`
+        );
+      }
     }
     const contentType = CONTENT_TYPES[file.extension.toLowerCase()];
     const doc = await this.client.uploadDocument(
@@ -1064,10 +1071,12 @@ var SyncEngine = class {
       uploadBytes,
       contentType
     );
+    let metaError = null;
     if (Object.keys(meta).length > 0) {
       try {
         await this.client.setDocumentMetadata(datasetId, doc.id, meta);
       } catch (e) {
+        metaError = e;
         console.error(
           `RAGFlow Sync: failed to set metadata for ${change.vaultPath}:`,
           e,
@@ -1083,8 +1092,14 @@ var SyncEngine = class {
       size: file.stat.size,
       mtime: file.stat.mtime,
       lastSyncedAt: Date.now(),
-      processingVersion: PROCESSING_VERSION
+      processingVersion: PROCESSING_VERSION,
+      ...metaError ? { metaPending: true } : {}
     });
+    if (metaError) {
+      throw new Error(
+        `uploaded, but setting metadata failed: ${metaError.message} (document kept; metadata will be retried on the next scan)`
+      );
+    }
   }
   /**
    * Decode a Markdown file, strip its YAML frontmatter (parsed out as metadata),
@@ -1123,7 +1138,7 @@ var SyncEngine = class {
    * indexed under several keys (see indexCompanionTarget) so resolution survives
    * a link that carries an extension, omits one, or does not resolve uniquely.
    */
-  buildCompanionIndex() {
+  async buildCompanionIndex() {
     const index = /* @__PURE__ */ new Map();
     const folders = new Set(
       this.getSettings().datasetMappings.map((m) => m.companionSourceFolder).filter((f) => !!f && f.length > 0)
@@ -1133,7 +1148,7 @@ var SyncEngine = class {
       const prefix = `${folder}/`;
       const notes = this.app.vault.getMarkdownFiles().filter((f) => f.path === folder || f.path.startsWith(prefix));
       for (const note of notes) {
-        const fm = this.app.metadataCache.getFileCache(note)?.frontmatter;
+        const fm = this.app.metadataCache.getFileCache(note)?.frontmatter ?? await this.readFrontmatter(note);
         if (!fm)
           continue;
         const targets = frontmatterLinkTargets(fm);
@@ -1147,6 +1162,22 @@ var SyncEngine = class {
       index.set(folder, map);
     }
     return index;
+  }
+  /** Parse a note's frontmatter straight from disk; undefined when absent/invalid. */
+  async readFrontmatter(note) {
+    try {
+      const text = await this.app.vault.cachedRead(note);
+      const { yaml } = splitFrontmatter(text);
+      if (yaml === null)
+        return void 0;
+      const parsed = (0, import_obsidian4.parseYaml)(yaml);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed;
+      }
+      return void 0;
+    } catch (_e) {
+      return void 0;
+    }
   }
   /**
    * Record a companion match under every key a later upload might look it up by,

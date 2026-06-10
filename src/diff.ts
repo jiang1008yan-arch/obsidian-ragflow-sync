@@ -46,6 +46,10 @@ export function classifyByStat(
 			// Stale transform version: re-upload even if the source is identical,
 			// so plugin processing changes reach already-synced documents.
 			result.reprocess.push({ entry, record, mapping });
+		} else if (record.metaPending) {
+			// Uploaded but its metadata call failed: re-upload to retry the
+			// metadata rather than leaving the document permanently without it.
+			result.reprocess.push({ entry, record, mapping });
 		} else if (record.size === entry.size && record.mtime === entry.mtime) {
 			result.unchanged.push({ entry, record, mapping });
 		} else {
