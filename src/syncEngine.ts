@@ -30,7 +30,7 @@ import {
  * before versioning carry no version and so are treated as stale, forcing a
  * one-time re-sync.
  */
-export const PROCESSING_VERSION = 3;
+export const PROCESSING_VERSION = 4;
 
 const CONTENT_TYPES: Record<string, string> = {
 	md: "text/markdown",
@@ -255,7 +255,9 @@ export class SyncEngine {
 			} catch (e) {
 				console.error(
 					`RAGFlow Sync: failed to set metadata for ${change.vaultPath}:`,
-					e
+					e,
+					"\nmeta_fields sent:",
+					JSON.stringify(meta)
 				);
 			}
 		}

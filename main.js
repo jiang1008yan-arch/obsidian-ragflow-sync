@@ -718,6 +718,8 @@ function splitFrontmatter(text) {
 function cleanWikilinks(value) {
   if (typeof value === "string")
     return stripWikilinks(value);
+  if (value instanceof Date)
+    return isoDate(value);
   if (Array.isArray(value))
     return value.map(cleanWikilinks);
   if (value !== null && typeof value === "object") {
@@ -728,6 +730,30 @@ function cleanWikilinks(value) {
     return out;
   }
   return value;
+}
+function isoDate(d) {
+  const iso = d.toISOString();
+  return iso.endsWith("T00:00:00.000Z") ? iso.slice(0, 10) : iso;
+}
+function metaValue(value) {
+  if (value === null || value === void 0)
+    return void 0;
+  if (typeof value === "string")
+    return stripWikilinks(value);
+  if (typeof value === "boolean")
+    return value;
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : void 0;
+  }
+  if (value instanceof Date)
+    return isoDate(value);
+  if (Array.isArray(value)) {
+    return value.map(metaValue).filter((v) => v !== void 0).map((v) => typeof v === "object" ? JSON.stringify(v) : v);
+  }
+  if (typeof value === "object") {
+    return JSON.stringify(cleanWikilinks(value));
+  }
+  return void 0;
 }
 function frontmatterLinkTargets(value) {
   const out = [];
@@ -750,14 +776,15 @@ function frontmatterLinkTargets(value) {
   return out;
 }
 function normalizeMeta(parsed) {
-  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) || parsed instanceof Date) {
     return {};
   }
   const out = {};
   for (const [key, value] of Object.entries(parsed)) {
-    if (value === void 0)
+    const v = metaValue(value);
+    if (v === void 0)
       continue;
-    out[key] = cleanWikilinks(value);
+    out[key] = v;
   }
   return out;
 }
@@ -887,7 +914,7 @@ function normalizeTables(src) {
 }
 
 // src/syncEngine.ts
-var PROCESSING_VERSION = 3;
+var PROCESSING_VERSION = 4;
 var CONTENT_TYPES = {
   md: "text/markdown",
   txt: "text/plain",
@@ -1043,7 +1070,9 @@ var SyncEngine = class {
       } catch (e) {
         console.error(
           `RAGFlow Sync: failed to set metadata for ${change.vaultPath}:`,
-          e
+          e,
+          "\nmeta_fields sent:",
+          JSON.stringify(meta)
         );
       }
     }
