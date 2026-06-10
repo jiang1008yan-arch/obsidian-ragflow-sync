@@ -777,6 +777,10 @@ function frontmatterLinkTargets(value) {
   visit(value);
   return out;
 }
+function splitPartStem(baseName) {
+  const m = /^(.+?)_p\d+(?:-\d+)?$/i.exec(baseName);
+  return m ? m[1] : null;
+}
 function normalizeMeta(parsed) {
   if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed) || parsed instanceof Date) {
     return {};
@@ -1201,12 +1205,21 @@ var SyncEngine = class {
     const base = dot > 0 ? name.slice(0, dot) : name;
     map.set(`base:${base.toLowerCase()}`, meta);
   }
-  /** A file's companion metadata: by resolved path, then file name, then base. */
+  /**
+   * A file's companion metadata: by resolved path, then file name, then base.
+   * As a last resort, a split part named `<stem>_p<start>-<end>` falls back to
+   * its stem, so an oversized document carved into page-range parts can share a
+   * single source note that links to the whole document.
+   */
   lookupCompanion(sourceFolder, file) {
     const map = this.companionIndex?.get(sourceFolder);
     if (!map)
       return void 0;
-    return map.get(file.path) ?? map.get(`name:${file.name.toLowerCase()}`) ?? map.get(`base:${file.basename.toLowerCase()}`);
+    const direct = map.get(file.path) ?? map.get(`name:${file.name.toLowerCase()}`) ?? map.get(`base:${file.basename.toLowerCase()}`);
+    if (direct)
+      return direct;
+    const stem = splitPartStem(file.basename);
+    return stem ? map.get(`base:${stem.toLowerCase()}`) : void 0;
   }
   /**
    * Outgoing links and backlinks for a note, as titles, from Obsidian's

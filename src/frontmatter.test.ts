@@ -3,6 +3,7 @@ import {
 	frontmatterLinkTargets,
 	normalizeMeta,
 	splitFrontmatter,
+	splitPartStem,
 } from "./frontmatter";
 
 describe("splitFrontmatter", () => {
@@ -69,6 +70,32 @@ describe("frontmatterLinkTargets", () => {
 			"img.png",
 		]);
 		expect(frontmatterLinkTargets({ title: "No links here", n: 3 })).toEqual([]);
+	});
+});
+
+describe("splitPartStem", () => {
+	it("strips a page-range suffix to recover the document stem", () => {
+		expect(splitPartStem("Report_p1-90")).toBe("Report");
+		expect(splitPartStem("Report_p91-180")).toBe("Report");
+		expect(splitPartStem("US_场站_ADA-标准_2010_p181-255")).toBe(
+			"US_场站_ADA-标准_2010"
+		);
+	});
+
+	it("accepts a lone-page suffix and is case-insensitive on the marker", () => {
+		expect(splitPartStem("Doc_p5")).toBe("Doc");
+		expect(splitPartStem("Doc_P12-34")).toBe("Doc");
+	});
+
+	it("keeps a stem that itself ends in an underscored token", () => {
+		expect(splitPartStem("Vol_2_p1-90")).toBe("Vol_2");
+	});
+
+	it("returns null when there is no page-range suffix", () => {
+		expect(splitPartStem("Report")).toBeNull();
+		expect(splitPartStem("Report_part1")).toBeNull();
+		expect(splitPartStem("Report_p")).toBeNull();
+		expect(splitPartStem("p1-90")).toBeNull();
 	});
 });
 

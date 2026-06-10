@@ -10,6 +10,9 @@ export interface DatasetMapping {
 	 * frontmatter links to it (e.g. a note with `file: "[[report.pdf]]"` supplies
 	 * metadata for report.pdf), set as the document's RAGFlow metadata. Pairing is
 	 * by the explicit frontmatter link, not by filename, so names need not match.
+	 * A document split into page-range parts (`<stem>_p1-90`, `<stem>_p91-180`,
+	 * …) needs only one note linking to the whole document (`[[<stem>]]`): each
+	 * part falls back to its stem and inherits the same metadata.
 	 * Empty/undefined disables companion metadata for the mapping.
 	 */
 	companionSourceFolder?: string;
