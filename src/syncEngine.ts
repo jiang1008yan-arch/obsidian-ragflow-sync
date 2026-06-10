@@ -166,7 +166,7 @@ export class SyncEngine {
 		let done = 0;
 		const result: ApplyResult = { ok: 0, failed: 0, errors: [] };
 
-		this.companionIndex = this.buildCompanionIndex();
+		this.companionIndex = await this.buildCompanionIndex();
 		try {
 			for (const change of actionable) {
 				try {
@@ -236,7 +236,15 @@ export class SyncEngine {
 		const sourceFolder = change.mapping?.companionSourceFolder;
 		if (Object.keys(meta).length === 0 && sourceFolder) {
 			const found = this.lookupCompanion(sourceFolder, file);
-			if (found) meta = found;
+			if (found) {
+				meta = found;
+			} else {
+				console.warn(
+					`RAGFlow Sync: no companion metadata for ${change.vaultPath} — ` +
+						`no note in "${sourceFolder}" has a frontmatter link to it, ` +
+						`so the document is uploaded without metadata.`
+				);
+			}
 		}
 
 		const contentType = CONTENT_TYPES[file.extension.toLowerCase()];
@@ -247,12 +255,15 @@ export class SyncEngine {
 			contentType
 		);
 
-		// Set the note's frontmatter as RAGFlow document metadata. Best-effort:
-		// a metadata failure should not undo a successful upload.
+		// Set the note's frontmatter as RAGFlow document metadata. The upload is
+		// kept either way, but a metadata failure marks the record metaPending so
+		// the next scan retries it, and is reported as this file's failure.
+		let metaError: Error | null = null;
 		if (Object.keys(meta).length > 0) {
 			try {
 				await this.client.setDocumentMetadata(datasetId, doc.id, meta);
 			} catch (e) {
+				metaError = e as Error;
 				console.error(
 					`RAGFlow Sync: failed to set metadata for ${change.vaultPath}:`,
 					e,
@@ -270,7 +281,15 @@ export class SyncEngine {
 			mtime: file.stat.mtime,
 			lastSyncedAt: Date.now(),
 			processingVersion: PROCESSING_VERSION,
+			...(metaError ? { metaPending: true } : {}),
 		});
+
+		if (metaError) {
+			throw new Error(
+				`uploaded, but setting metadata failed: ${metaError.message} ` +
+					`(document kept; metadata will be retried on the next scan)`
+			);
+		}
 	}
 
 	/**
@@ -318,9 +337,8 @@ export class SyncEngine {
 	 * indexed under several keys (see indexCompanionTarget) so resolution survives
 	 * a link that carries an extension, omits one, or does not resolve uniquely.
 	 */
-	private buildCompanionIndex(): Map<
-		string,
-		Map<string, Record<string, unknown>>
+	private async buildCompanionIndex(): Promise<
+		Map<string, Map<string, Record<string, unknown>>>
 	> {
 		const index = new Map<string, Map<string, Record<string, unknown>>>();
 		const folders = new Set(
@@ -337,7 +355,12 @@ export class SyncEngine {
 				.filter((f) => f.path === folder || f.path.startsWith(prefix));
 
 			for (const note of notes) {
-				const fm = this.app.metadataCache.getFileCache(note)?.frontmatter;
+				// The metadata cache may not have indexed a note yet (e.g. a sync
+				// right after the vault opens); fall back to parsing the note's
+				// frontmatter from disk so the whole batch doesn't lose metadata.
+				const fm =
+					this.app.metadataCache.getFileCache(note)?.frontmatter ??
+					(await this.readFrontmatter(note));
 				if (!fm) continue;
 				const targets = frontmatterLinkTargets(fm);
 				if (targets.length === 0) continue;
@@ -349,6 +372,24 @@ export class SyncEngine {
 			index.set(folder, map);
 		}
 		return index;
+	}
+
+	/** Parse a note's frontmatter straight from disk; undefined when absent/invalid. */
+	private async readFrontmatter(
+		note: TFile
+	): Promise<Record<string, unknown> | undefined> {
+		try {
+			const text = await this.app.vault.cachedRead(note);
+			const { yaml } = splitFrontmatter(text);
+			if (yaml === null) return undefined;
+			const parsed = parseYaml(yaml);
+			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+				return parsed as Record<string, unknown>;
+			}
+			return undefined;
+		} catch (_e) {
+			return undefined;
+		}
 	}
 
 	/**

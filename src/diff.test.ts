@@ -122,6 +122,23 @@ describe("classifyByStat", () => {
 			expect(r.reprocess.map((x) => x.entry.path)).toEqual(["Notes/a.md"]);
 		});
 
+		it("reprocesses a record whose metadata call previously failed", () => {
+			const r = classifyByStat(
+				[entry("Notes/a.pdf", 10, 100)],
+				state({
+					"Notes/a.pdf": record({
+						size: 10,
+						mtime: 100,
+						processingVersion: 2,
+						metaPending: true,
+					}),
+				}),
+				scope({ processingVersion: 2 })
+			);
+			expect(r.reprocess.map((x) => x.entry.path)).toEqual(["Notes/a.pdf"]);
+			expect(r.unchanged).toHaveLength(0);
+		});
+
 		it("does not reprocess when versions match (stays on the fast path)", () => {
 			const r = classifyByStat(
 				[entry("Notes/a.md", 10, 100)],
