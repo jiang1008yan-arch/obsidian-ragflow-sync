@@ -34,9 +34,12 @@ export function splitFrontmatter(text: string): SplitNote {
  * value to its plain display text. Walks strings, arrays, and nested mappings so
  * a value like "[[Project A]]" or ["[[A]]", "[[B|b]]"] reaches RAGFlow as clean
  * text; non-string leaves (numbers, booleans, null) pass through untouched.
+ * Dates (js-yaml parses unquoted YAML timestamps into Date) become ISO strings
+ * rather than being walked as objects.
  */
 function cleanWikilinks(value: unknown): unknown {
 	if (typeof value === "string") return stripWikilinks(value);
+	if (value instanceof Date) return isoDate(value);
 	if (Array.isArray(value)) return value.map(cleanWikilinks);
 	if (value !== null && typeof value === "object") {
 		const out: Record<string, unknown> = {};
@@ -46,6 +49,40 @@ function cleanWikilinks(value: unknown): unknown {
 		return out;
 	}
 	return value;
+}
+
+/** A date-only YAML timestamp renders as "YYYY-MM-DD"; otherwise full ISO. */
+function isoDate(d: Date): string {
+	const iso = d.toISOString();
+	return iso.endsWith("T00:00:00.000Z") ? iso.slice(0, 10) : iso;
+}
+
+/**
+ * Coerce one frontmatter value into a shape RAGFlow's metadata store accepts:
+ * a JSON scalar (string/number/boolean) or an array of them. Nested mappings
+ * are serialized to a JSON string (their wikilinks still cleaned), dates become
+ * ISO strings, and null/undefined/non-finite values are dropped — RAGFlow's
+ * document-metadata backend rejects updates whose values it cannot index, and
+ * one bad value fails the whole metadata call.
+ */
+function metaValue(value: unknown): unknown {
+	if (value === null || value === undefined) return undefined;
+	if (typeof value === "string") return stripWikilinks(value);
+	if (typeof value === "boolean") return value;
+	if (typeof value === "number") {
+		return Number.isFinite(value) ? value : undefined;
+	}
+	if (value instanceof Date) return isoDate(value);
+	if (Array.isArray(value)) {
+		return value
+			.map(metaValue)
+			.filter((v) => v !== undefined)
+			.map((v) => (typeof v === "object" ? JSON.stringify(v) : v));
+	}
+	if (typeof value === "object") {
+		return JSON.stringify(cleanWikilinks(value));
+	}
+	return undefined;
 }
 
 /**
@@ -77,19 +114,26 @@ export function frontmatterLinkTargets(value: unknown): string[] {
 }
 
 /**
- * Normalize a parsed-YAML value into a metadata object. Returns an empty object
- * unless the parse produced a plain key/value mapping; undefined-valued keys are
- * dropped so they are not sent as metadata. Wikilinks in values are cleaned to
- * plain text so RAGFlow metadata never carries raw [[...]] syntax.
+ * Normalize a parsed-YAML value into the flat metadata object RAGFlow accepts.
+ * Returns an empty object unless the parse produced a plain key/value mapping.
+ * Every value is coerced through metaValue: wikilinks cleaned to plain text,
+ * dates to ISO strings, nested mappings to JSON strings, null/undefined keys
+ * dropped so a single unindexable value cannot fail the metadata update.
  */
 export function normalizeMeta(parsed: unknown): Record<string, unknown> {
-	if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+	if (
+		parsed === null ||
+		typeof parsed !== "object" ||
+		Array.isArray(parsed) ||
+		parsed instanceof Date
+	) {
 		return {};
 	}
 	const out: Record<string, unknown> = {};
 	for (const [key, value] of Object.entries(parsed as Record<string, unknown>)) {
-		if (value === undefined) continue;
-		out[key] = cleanWikilinks(value);
+		const v = metaValue(value);
+		if (v === undefined) continue;
+		out[key] = v;
 	}
 	return out;
 }

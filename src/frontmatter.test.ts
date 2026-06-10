@@ -103,9 +103,36 @@ describe("normalizeMeta", () => {
 		});
 	});
 
-	it("cleans wikilinks inside nested mappings", () => {
+	it("serializes nested mappings to JSON strings, wikilinks cleaned", () => {
+		// RAGFlow's metadata store only indexes flat scalar/array values; a nested
+		// object in meta_fields fails the whole update server-side.
 		expect(normalizeMeta({ meta: { source: "[[Ref#Section]]" } })).toEqual({
-			meta: { source: "Ref > Section" },
+			meta: '{"source":"Ref > Section"}',
+		});
+	});
+
+	it("drops null values instead of sending them to RAGFlow", () => {
+		expect(normalizeMeta({ a: 1, b: null, c: "x" })).toEqual({ a: 1, c: "x" });
+	});
+
+	it("converts YAML dates to ISO strings", () => {
+		// js-yaml parses an unquoted `date: 2025-06-01` into a Date object; sent
+		// as-is it would reach RAGFlow as an empty {} after the wikilink walk.
+		expect(normalizeMeta({ date: new Date("2025-06-01") })).toEqual({
+			date: "2025-06-01",
+		});
+		expect(
+			normalizeMeta({ at: new Date("2025-06-01T08:30:00.000Z") })
+		).toEqual({ at: "2025-06-01T08:30:00.000Z" });
+	});
+
+	it("flattens arrays: nulls dropped, dates and nested values stringified", () => {
+		expect(
+			normalizeMeta({
+				list: ["a", null, 3, new Date("2025-06-01"), { k: "v" }, ["x", "y"]],
+			})
+		).toEqual({
+			list: ["a", 3, "2025-06-01", '{"k":"v"}', '["x","y"]'],
 		});
 	});
 
