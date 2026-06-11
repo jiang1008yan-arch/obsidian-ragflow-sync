@@ -259,6 +259,29 @@ makes `report.pdf` upload with RAGFlow metadata `{ "file": "report.pdf",
 "title": "Quarterly Report", "tags": ["finance", "2025"] }`. Leave the dropdown
 on "Companion meta: off" to disable it for that mapping.
 
+##### Split Documents Share One Note
+
+RAGFlow's PaddleOCR pipeline caps OCR at roughly 200 pages and is slow on large
+files, so an oversized PDF is best split into parts under ~100 pages. Name each
+part `<stem>_p<start>-<end>` — for example, splitting `ADA-Standard_2010` gives
+`ADA-Standard_2010_p1-90`, `ADA-Standard_2010_p91-180`, and
+`ADA-Standard_2010_p181-255` (a lone-page `<stem>_p<n>` works too). A part with
+no companion match of its own then falls back to its **stem**, so a single
+metadata note linking to the whole document supplies every part with the same
+properties:
+
+```yaml
+---
+file: "[[ADA-Standard_2010]]"
+title: ADA Accessibility Standard
+year: 2010
+---
+```
+
+All three parts upload with that identical metadata — no need to list each part.
+You can still list parts explicitly (`file: ["[[..._p1-90]]", "[[..._p91-180]]"]`)
+if you prefer; the stem fallback only kicks in when a part has no direct match.
+
 This is deliberately separate from the always-on "a note's own frontmatter
 becomes its own metadata" behavior above, so the two never mix:
 

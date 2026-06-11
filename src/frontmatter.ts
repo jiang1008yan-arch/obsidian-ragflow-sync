@@ -114,6 +114,20 @@ export function frontmatterLinkTargets(value: unknown): string[] {
 }
 
 /**
+ * Strip a trailing page-range suffix from a file base name, returning the
+ * logical document stem — or null when the name carries no such suffix. An
+ * oversized PDF (RAGFlow's PaddleOCR caps OCR around 200 pages) is split into
+ * parts named `<stem>_p<start>-<end>` — e.g. "Report_p1-90", "Report_p91-180";
+ * a lone-page split `<stem>_p<n>` is accepted too. All parts share one source
+ * note, so each resolves back to its stem ("Report") for the companion lookup,
+ * letting the note link to the whole document instead of every part. Pure.
+ */
+export function splitPartStem(baseName: string): string | null {
+	const m = /^(.+?)_p\d+(?:-\d+)?$/i.exec(baseName);
+	return m ? m[1] : null;
+}
+
+/**
  * Normalize a parsed-YAML value into the flat metadata object RAGFlow accepts.
  * Returns an empty object unless the parse produced a plain key/value mapping.
  * Every value is coerced through metaValue: wikilinks cleaned to plain text,

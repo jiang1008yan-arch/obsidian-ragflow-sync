@@ -8,6 +8,7 @@ import {
 	frontmatterLinkTargets,
 	normalizeMeta,
 	splitFrontmatter,
+	splitPartStem,
 } from "./frontmatter";
 import { normalizeTables } from "./tables";
 import {
@@ -419,18 +420,25 @@ export class SyncEngine {
 		map.set(`base:${base.toLowerCase()}`, meta);
 	}
 
-	/** A file's companion metadata: by resolved path, then file name, then base. */
+	/**
+	 * A file's companion metadata: by resolved path, then file name, then base.
+	 * As a last resort, a split part named `<stem>_p<start>-<end>` falls back to
+	 * its stem, so an oversized document carved into page-range parts can share a
+	 * single source note that links to the whole document.
+	 */
 	private lookupCompanion(
 		sourceFolder: string,
 		file: TFile
 	): Record<string, unknown> | undefined {
 		const map = this.companionIndex?.get(sourceFolder);
 		if (!map) return undefined;
-		return (
+		const direct =
 			map.get(file.path) ??
 			map.get(`name:${file.name.toLowerCase()}`) ??
-			map.get(`base:${file.basename.toLowerCase()}`)
-		);
+			map.get(`base:${file.basename.toLowerCase()}`);
+		if (direct) return direct;
+		const stem = splitPartStem(file.basename);
+		return stem ? map.get(`base:${stem.toLowerCase()}`) : undefined;
 	}
 
 	/**
