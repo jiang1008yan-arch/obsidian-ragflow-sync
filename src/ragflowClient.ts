@@ -16,6 +16,17 @@ export class RagflowClient {
 		this.getSettings = getSettings;
 	}
 
+	/**
+	 * Drop the cached dataset list and name->id map. The client lives for the
+	 * whole plugin session, so this must be called when the connection settings
+	 * (base URL / API key) change — otherwise a later list or a "Test connection"
+	 * would answer from a cache built against the old server.
+	 */
+	invalidate(): void {
+		this.datasetsCache = null;
+		this.datasetIdByName.clear();
+	}
+
 	private base(): string {
 		const url = this.getSettings().ragflowBaseUrl.replace(/\/+$/, "");
 		return `${url}/api/v1`;

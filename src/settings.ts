@@ -69,6 +69,8 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.ragflowBaseUrl)
 					.onChange(async (value) => {
 						this.plugin.settings.ragflowBaseUrl = value.trim();
+						// Connection target changed: drop caches built against the old one.
+						this.plugin.client.invalidate();
 						await this.plugin.saveSettings();
 					})
 			);
@@ -83,6 +85,7 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.apiKey)
 					.onChange(async (value) => {
 						this.plugin.settings.apiKey = value.trim();
+						this.plugin.client.invalidate();
 						await this.plugin.saveSettings();
 					});
 			});
@@ -95,6 +98,9 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 					btn.setDisabled(true);
 					btn.setButtonText("Testing...");
 					try {
+						// Force a real request, not a cached answer, so the test reflects
+						// the current URL/key.
+						this.plugin.client.invalidate();
 						await this.plugin.client.listDatasets();
 						new Notice("RAGFlow connection OK.");
 					} catch (e) {

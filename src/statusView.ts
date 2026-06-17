@@ -2,6 +2,16 @@ import { ItemView, Notice, WorkspaceLeaf } from "obsidian";
 import type RagflowSyncPlugin from "./main";
 import { ChangeKind, FileChange } from "./types";
 import { summarize } from "./syncEngine";
+import {
+	allFolderPaths,
+	buildTree,
+	changeSummary,
+	foldersWithChanges,
+	isFileLeaf,
+	leavesOf,
+	sortedChildren,
+	TreeNode,
+} from "./tree";
 
 export const VIEW_TYPE_RAGFLOW_SYNC = "ragflow-sync-view";
 
@@ -11,18 +21,6 @@ const KIND_LABEL: Record<ChangeKind, string> = {
 	deleted: "Deleted",
 	unchanged: "Up to date",
 };
-
-/** A node in the vault-folder tree the panel renders the diff into. */
-interface TreeNode {
-	/** Last path segment (folder or file name). */
-	name: string;
-	/** Full vault path to this node. */
-	path: string;
-	/** Child folders and files, keyed by their name segment. */
-	children: Map<string, TreeNode>;
-	/** Present only on a file leaf: the diff entry for that file. */
-	change?: FileChange;
-}
 
 export class RagflowSyncView extends ItemView {
 	plugin: RagflowSyncPlugin;
@@ -82,7 +80,7 @@ export class RagflowSyncView extends ItemView {
 			// A fresh scan is a clean slate: drop any prior selection and expand the
 			// folders that hold actionable changes so they are visible at a glance.
 			this.selected.clear();
-			this.expanded = this.foldersWithChanges(this.changes);
+			this.expanded = foldersWithChanges(this.changes);
 			if (result.missingMappings.length > 0) {
 				new Notice(
 					`Some mapped folders were not found: ${result.missingMappings
@@ -225,7 +223,7 @@ export class RagflowSyncView extends ItemView {
 			});
 		} else {
 			const tree = container.createDiv({ cls: "ragflow-sync-tree" });
-			const root = this.buildTree(this.changes);
+			const root = buildTree(this.changes);
 			this.renderChildren(tree, root, 0);
 		}
 
@@ -252,7 +250,7 @@ export class RagflowSyncView extends ItemView {
 		if (this.changes.length > 0) {
 			const expandBtn = toolbar.createEl("button", { text: "Expand all" });
 			expandBtn.onclick = () => {
-				this.expanded = this.allFolderPaths(this.changes);
+				this.expanded = allFolderPaths(this.changes);
 				this.render();
 			};
 			const collapseBtn = toolbar.createEl("button", { text: "Collapse all" });
@@ -269,15 +267,9 @@ export class RagflowSyncView extends ItemView {
 		node: TreeNode,
 		depth: number
 	): void {
-		const entries = [...node.children.values()].sort((a, b) => {
-			const aFolder = a.children.size > 0;
-			const bFolder = b.children.size > 0;
-			if (aFolder !== bFolder) return aFolder ? -1 : 1;
-			return a.name.localeCompare(b.name);
-		});
-		for (const child of entries) {
-			if (child.children.size > 0) this.renderFolder(parent, child, depth);
-			else this.renderFile(parent, child, depth);
+		for (const child of sortedChildren(node)) {
+			if (isFileLeaf(child)) this.renderFile(parent, child, depth);
+			else this.renderFolder(parent, child, depth);
 		}
 	}
 
@@ -286,7 +278,7 @@ export class RagflowSyncView extends ItemView {
 		node: TreeNode,
 		depth: number
 	): void {
-		const leaves = this.leavesOf(node);
+		const leaves = leavesOf(node);
 		const expanded = this.expanded.has(node.path);
 
 		const row = parent.createDiv({ cls: "ragflow-tree-row ragflow-tree-folder" });
@@ -318,7 +310,7 @@ export class RagflowSyncView extends ItemView {
 		label.setText(node.name);
 		label.onclick = () => this.toggleFolder(node.path);
 
-		const summary = this.summaryText(leaves);
+		const summary = changeSummary(leaves);
 		if (summary) {
 			row.createSpan({ cls: "ragflow-tree-count", text: summary });
 		}
@@ -419,80 +411,4 @@ export class RagflowSyncView extends ItemView {
 		}
 	}
 
-	/** Build a nested folder tree from a flat list of file changes. */
-	private buildTree(changes: FileChange[]): TreeNode {
-		const root: TreeNode = { name: "", path: "", children: new Map() };
-		for (const change of changes) {
-			const parts = change.vaultPath.split("/");
-			let node = root;
-			let acc = "";
-			parts.forEach((part, i) => {
-				acc = acc ? `${acc}/${part}` : part;
-				let child = node.children.get(part);
-				if (!child) {
-					child = { name: part, path: acc, children: new Map() };
-					node.children.set(part, child);
-				}
-				if (i === parts.length - 1) child.change = change;
-				node = child;
-			});
-		}
-		return root;
-	}
-
-	/** Every file leaf under a node, in no particular order. */
-	private leavesOf(node: TreeNode): TreeNode[] {
-		if (node.change && node.children.size === 0) return [node];
-		const out: TreeNode[] = [];
-		for (const child of node.children.values()) {
-			out.push(...this.leavesOf(child));
-		}
-		return out;
-	}
-
-	/** A compact "2 new, 1 modified" summary of a folder's actionable leaves. */
-	private summaryText(leaves: TreeNode[]): string {
-		const counts: Record<ChangeKind, number> = {
-			new: 0,
-			modified: 0,
-			deleted: 0,
-			unchanged: 0,
-		};
-		for (const leaf of leaves) {
-			if (leaf.change) counts[leaf.change.kind] += 1;
-		}
-		const parts: string[] = [];
-		if (counts.new) parts.push(`${counts.new} new`);
-		if (counts.modified) parts.push(`${counts.modified} modified`);
-		if (counts.deleted) parts.push(`${counts.deleted} deleted`);
-		return parts.join(", ");
-	}
-
-	/** Ancestor folders of every actionable change — the default-expanded set. */
-	private foldersWithChanges(changes: FileChange[]): Set<string> {
-		const set = new Set<string>();
-		for (const change of changes) {
-			if (change.kind === "unchanged") continue;
-			this.addAncestorFolders(change.vaultPath, set);
-		}
-		return set;
-	}
-
-	/** Every folder path in the tree, for "Expand all". */
-	private allFolderPaths(changes: FileChange[]): Set<string> {
-		const set = new Set<string>();
-		for (const change of changes) {
-			this.addAncestorFolders(change.vaultPath, set);
-		}
-		return set;
-	}
-
-	private addAncestorFolders(vaultPath: string, set: Set<string>): void {
-		const parts = vaultPath.split("/");
-		let acc = "";
-		for (let i = 0; i < parts.length - 1; i++) {
-			acc = acc ? `${acc}/${parts[i]}` : parts[i];
-			set.add(acc);
-		}
-	}
 }

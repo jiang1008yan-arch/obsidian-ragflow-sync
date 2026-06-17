@@ -101,6 +101,7 @@ var RagflowSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
     new import_obsidian2.Setting(containerEl).setName("RAGFlow base URL").setDesc("e.g. http://127.0.0.1:9380 (no trailing /api/v1).").addText(
       (text) => text.setPlaceholder("http://127.0.0.1:9380").setValue(this.plugin.settings.ragflowBaseUrl).onChange(async (value) => {
         this.plugin.settings.ragflowBaseUrl = value.trim();
+        this.plugin.client.invalidate();
         await this.plugin.saveSettings();
       })
     );
@@ -108,6 +109,7 @@ var RagflowSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
       text.inputEl.type = "password";
       text.setPlaceholder("ragflow-xxxxxxxx").setValue(this.plugin.settings.apiKey).onChange(async (value) => {
         this.plugin.settings.apiKey = value.trim();
+        this.plugin.client.invalidate();
         await this.plugin.saveSettings();
       });
     });
@@ -116,6 +118,7 @@ var RagflowSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
         btn.setDisabled(true);
         btn.setButtonText("Testing...");
         try {
+          this.plugin.client.invalidate();
           await this.plugin.client.listDatasets();
           new import_obsidian2.Notice("RAGFlow connection OK.");
         } catch (e) {
@@ -322,6 +325,16 @@ var RagflowClient = class {
     this.datasetIdByName = /* @__PURE__ */ new Map();
     this.getSettings = getSettings;
   }
+  /**
+   * Drop the cached dataset list and name->id map. The client lives for the
+   * whole plugin session, so this must be called when the connection settings
+   * (base URL / API key) change — otherwise a later list or a "Test connection"
+   * would answer from a cache built against the old server.
+   */
+  invalidate() {
+    this.datasetsCache = null;
+    this.datasetIdByName.clear();
+  }
   base() {
     const url = this.getSettings().ragflowBaseUrl.replace(/\/+$/, "");
     return `${url}/api/v1`;
@@ -497,6 +510,7 @@ var RagflowClient = class {
 // src/syncState.ts
 var SyncStateStore = class {
   constructor(state, save) {
+    this.dirty = false;
     this.state = state;
     this.save = save;
   }
@@ -506,12 +520,21 @@ var SyncStateStore = class {
   allFiles() {
     return this.state.files;
   }
-  async setFile(vaultPath, record) {
+  /** Upsert a record in memory; call flush() to persist. */
+  setFile(vaultPath, record) {
     this.state.files[vaultPath] = record;
-    await this.save();
+    this.dirty = true;
   }
-  async deleteFile(vaultPath) {
+  /** Remove a record in memory; call flush() to persist. */
+  deleteFile(vaultPath) {
     delete this.state.files[vaultPath];
+    this.dirty = true;
+  }
+  /** Persist pending mutations, if any. A no-op when nothing changed. */
+  async flush() {
+    if (!this.dirty)
+      return;
+    this.dirty = false;
     await this.save();
   }
 };
@@ -967,14 +990,9 @@ var CONTENT_TYPES = {
   jpeg: "image/jpeg",
   gif: "image/gif"
 };
+var FLUSH_EVERY = 25;
 var SyncEngine = class {
   constructor(app, client, store, getSettings) {
-    /**
-     * Per-run companion-metadata lookup, built at the start of applyChanges and
-     * cleared at the end: source folder -> (linked-file path -> that note's
-     * frontmatter). Null outside an apply run.
-     */
-    this.companionIndex = null;
     this.app = app;
     this.client = client;
     this.store = store;
@@ -1020,12 +1038,13 @@ var SyncEngine = class {
     }
     const hashed = finalizeWithHashes(stat.needHash, hashes);
     for (const touch of hashed.touches) {
-      await this.store.setFile(touch.vaultPath, {
+      this.store.setFile(touch.vaultPath, {
         ...touch.record,
         size: touch.size,
         mtime: touch.mtime
       });
     }
+    await this.store.flush();
     return {
       changes: assembleChanges(stat, hashed),
       missingMappings: this.missingMappings()
@@ -1042,15 +1061,20 @@ var SyncEngine = class {
     let done = 0;
     const result = { ok: 0, failed: 0, errors: [], parsed: 0 };
     const uploaded = /* @__PURE__ */ new Map();
-    this.companionIndex = await this.buildCompanionIndex();
+    const companionIndex = await this.buildCompanionIndex();
+    let sinceFlush = 0;
     try {
       for (const change of actionable) {
         try {
           if (change.kind === "new") {
-            const up = await this.syncUpload(change, void 0);
+            const up = await this.syncUpload(change, void 0, companionIndex);
             this.recordUpload(uploaded, up);
           } else if (change.kind === "modified") {
-            const up = await this.syncUpload(change, change.record);
+            const up = await this.syncUpload(
+              change,
+              change.record,
+              companionIndex
+            );
             this.recordUpload(uploaded, up);
           } else if (change.kind === "deleted") {
             if (change.record) {
@@ -1058,7 +1082,7 @@ var SyncEngine = class {
                 change.record.documentId
               ]);
             }
-            await this.store.deleteFile(change.vaultPath);
+            this.store.deleteFile(change.vaultPath);
           }
           result.ok += 1;
         } catch (e) {
@@ -1066,10 +1090,14 @@ var SyncEngine = class {
           result.errors.push(`${change.vaultPath}: ${e.message}`);
         }
         done += 1;
+        if (++sinceFlush >= FLUSH_EVERY) {
+          await this.store.flush();
+          sinceFlush = 0;
+        }
         onProgress?.(done, actionable.length, change.vaultPath);
       }
     } finally {
-      this.companionIndex = null;
+      await this.store.flush();
     }
     if (this.getSettings().autoParse) {
       for (const [datasetId, ids] of uploaded) {
@@ -1094,7 +1122,7 @@ var SyncEngine = class {
     else
       uploaded.set(up.datasetId, [up.documentId]);
   }
-  async syncUpload(change, oldRecord) {
+  async syncUpload(change, oldRecord, companionIndex) {
     const file = this.app.vault.getAbstractFileByPath(change.vaultPath);
     if (!(file instanceof import_obsidian4.TFile)) {
       throw new Error("File no longer exists in vault.");
@@ -1115,7 +1143,7 @@ var SyncEngine = class {
     let meta = prepared.meta;
     const sourceFolder = change.mapping?.companionSourceFolder;
     if (Object.keys(meta).length === 0 && sourceFolder) {
-      const found = this.lookupCompanion(sourceFolder, file);
+      const found = this.lookupCompanion(companionIndex, sourceFolder, file);
       if (found) {
         meta = found;
       } else {
@@ -1145,7 +1173,7 @@ var SyncEngine = class {
         );
       }
     }
-    await this.store.setFile(change.vaultPath, {
+    this.store.setFile(change.vaultPath, {
       documentId: doc.id,
       datasetId,
       hash,
@@ -1268,8 +1296,8 @@ var SyncEngine = class {
    * its stem, so an oversized document carved into page-range parts can share a
    * single source note that links to the whole document.
    */
-  lookupCompanion(sourceFolder, file) {
-    const map = this.companionIndex?.get(sourceFolder);
+  lookupCompanion(companionIndex, sourceFolder, file) {
+    const map = companionIndex.get(sourceFolder);
     if (!map)
       return void 0;
     const direct = map.get(file.path) ?? map.get(`name:${file.name.toLowerCase()}`) ?? map.get(`base:${file.basename.toLowerCase()}`);
@@ -1310,6 +1338,93 @@ function summarize(changes) {
 
 // src/statusView.ts
 var import_obsidian5 = require("obsidian");
+
+// src/tree.ts
+function buildTree(changes) {
+  const root = { name: "", path: "", children: /* @__PURE__ */ new Map() };
+  for (const change of changes) {
+    const parts = change.vaultPath.split("/");
+    let node = root;
+    let acc = "";
+    parts.forEach((part, i) => {
+      acc = acc ? `${acc}/${part}` : part;
+      let child = node.children.get(part);
+      if (!child) {
+        child = { name: part, path: acc, children: /* @__PURE__ */ new Map() };
+        node.children.set(part, child);
+      }
+      if (i === parts.length - 1)
+        child.change = change;
+      node = child;
+    });
+  }
+  return root;
+}
+function isFileLeaf(node) {
+  return !!node.change && node.children.size === 0;
+}
+function sortedChildren(node) {
+  return [...node.children.values()].sort((a, b) => {
+    const aFolder = a.children.size > 0;
+    const bFolder = b.children.size > 0;
+    if (aFolder !== bFolder)
+      return aFolder ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+}
+function leavesOf(node) {
+  if (isFileLeaf(node))
+    return [node];
+  const out = [];
+  for (const child of node.children.values())
+    out.push(...leavesOf(child));
+  return out;
+}
+function changeSummary(leaves) {
+  const counts = {
+    new: 0,
+    modified: 0,
+    deleted: 0,
+    unchanged: 0
+  };
+  for (const leaf of leaves) {
+    if (leaf.change)
+      counts[leaf.change.kind] += 1;
+  }
+  const parts = [];
+  if (counts.new)
+    parts.push(`${counts.new} new`);
+  if (counts.modified)
+    parts.push(`${counts.modified} modified`);
+  if (counts.deleted)
+    parts.push(`${counts.deleted} deleted`);
+  return parts.join(", ");
+}
+function addAncestorFolders(vaultPath, set) {
+  const parts = vaultPath.split("/");
+  let acc = "";
+  for (let i = 0; i < parts.length - 1; i++) {
+    acc = acc ? `${acc}/${parts[i]}` : parts[i];
+    set.add(acc);
+  }
+}
+function foldersWithChanges(changes) {
+  const set = /* @__PURE__ */ new Set();
+  for (const change of changes) {
+    if (change.kind === "unchanged")
+      continue;
+    addAncestorFolders(change.vaultPath, set);
+  }
+  return set;
+}
+function allFolderPaths(changes) {
+  const set = /* @__PURE__ */ new Set();
+  for (const change of changes)
+    addAncestorFolders(change.vaultPath, set);
+  return set;
+}
+
+// src/statusView.ts
 var VIEW_TYPE_RAGFLOW_SYNC = "ragflow-sync-view";
 var KIND_LABEL = {
   new: "New",
@@ -1365,7 +1480,7 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
       const result = await this.plugin.engine.computeDiff();
       this.changes = result.changes;
       this.selected.clear();
-      this.expanded = this.foldersWithChanges(this.changes);
+      this.expanded = foldersWithChanges(this.changes);
       if (result.missingMappings.length > 0) {
         new import_obsidian5.Notice(
           `Some mapped folders were not found: ${result.missingMappings.map((m) => m.vaultPath).join(", ")}`
@@ -1494,7 +1609,7 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
       });
     } else {
       const tree = container.createDiv({ cls: "ragflow-sync-tree" });
-      const root = this.buildTree(this.changes);
+      const root = buildTree(this.changes);
       this.renderChildren(tree, root, 0);
     }
     this.renderIgnored(container);
@@ -1515,7 +1630,7 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
     if (this.changes.length > 0) {
       const expandBtn = toolbar.createEl("button", { text: "Expand all" });
       expandBtn.onclick = () => {
-        this.expanded = this.allFolderPaths(this.changes);
+        this.expanded = allFolderPaths(this.changes);
         this.render();
       };
       const collapseBtn = toolbar.createEl("button", { text: "Collapse all" });
@@ -1527,22 +1642,15 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
   }
   /** Render the folders-then-files under a node, sorted, at the given depth. */
   renderChildren(parent, node, depth) {
-    const entries = [...node.children.values()].sort((a, b) => {
-      const aFolder = a.children.size > 0;
-      const bFolder = b.children.size > 0;
-      if (aFolder !== bFolder)
-        return aFolder ? -1 : 1;
-      return a.name.localeCompare(b.name);
-    });
-    for (const child of entries) {
-      if (child.children.size > 0)
-        this.renderFolder(parent, child, depth);
-      else
+    for (const child of sortedChildren(node)) {
+      if (isFileLeaf(child))
         this.renderFile(parent, child, depth);
+      else
+        this.renderFolder(parent, child, depth);
     }
   }
   renderFolder(parent, node, depth) {
-    const leaves = this.leavesOf(node);
+    const leaves = leavesOf(node);
     const expanded = this.expanded.has(node.path);
     const row = parent.createDiv({ cls: "ragflow-tree-row ragflow-tree-folder" });
     row.style.paddingLeft = `${depth * 16}px`;
@@ -1571,7 +1679,7 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
     const label = row.createDiv({ cls: "ragflow-tree-name" });
     label.setText(node.name);
     label.onclick = () => this.toggleFolder(node.path);
-    const summary = this.summaryText(leaves);
+    const summary = changeSummary(leaves);
     if (summary) {
       row.createSpan({ cls: "ragflow-tree-count", text: summary });
     }
@@ -1658,84 +1766,6 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
         n > 0 ? `Ignore selected (${n})` : "Ignore selected"
       );
       this.ignoreSelectedBtn.disabled = n === 0;
-    }
-  }
-  /** Build a nested folder tree from a flat list of file changes. */
-  buildTree(changes) {
-    const root = { name: "", path: "", children: /* @__PURE__ */ new Map() };
-    for (const change of changes) {
-      const parts = change.vaultPath.split("/");
-      let node = root;
-      let acc = "";
-      parts.forEach((part, i) => {
-        acc = acc ? `${acc}/${part}` : part;
-        let child = node.children.get(part);
-        if (!child) {
-          child = { name: part, path: acc, children: /* @__PURE__ */ new Map() };
-          node.children.set(part, child);
-        }
-        if (i === parts.length - 1)
-          child.change = change;
-        node = child;
-      });
-    }
-    return root;
-  }
-  /** Every file leaf under a node, in no particular order. */
-  leavesOf(node) {
-    if (node.change && node.children.size === 0)
-      return [node];
-    const out = [];
-    for (const child of node.children.values()) {
-      out.push(...this.leavesOf(child));
-    }
-    return out;
-  }
-  /** A compact "2 new, 1 modified" summary of a folder's actionable leaves. */
-  summaryText(leaves) {
-    const counts = {
-      new: 0,
-      modified: 0,
-      deleted: 0,
-      unchanged: 0
-    };
-    for (const leaf of leaves) {
-      if (leaf.change)
-        counts[leaf.change.kind] += 1;
-    }
-    const parts = [];
-    if (counts.new)
-      parts.push(`${counts.new} new`);
-    if (counts.modified)
-      parts.push(`${counts.modified} modified`);
-    if (counts.deleted)
-      parts.push(`${counts.deleted} deleted`);
-    return parts.join(", ");
-  }
-  /** Ancestor folders of every actionable change — the default-expanded set. */
-  foldersWithChanges(changes) {
-    const set = /* @__PURE__ */ new Set();
-    for (const change of changes) {
-      if (change.kind === "unchanged")
-        continue;
-      this.addAncestorFolders(change.vaultPath, set);
-    }
-    return set;
-  }
-  /** Every folder path in the tree, for "Expand all". */
-  allFolderPaths(changes) {
-    const set = /* @__PURE__ */ new Set();
-    for (const change of changes) {
-      this.addAncestorFolders(change.vaultPath, set);
-    }
-    return set;
-  }
-  addAncestorFolders(vaultPath, set) {
-    const parts = vaultPath.split("/");
-    let acc = "";
-    for (let i = 0; i < parts.length - 1; i++) {
-      acc = acc ? `${acc}/${parts[i]}` : parts[i];
-      set.add(acc);
     }
   }
 };
