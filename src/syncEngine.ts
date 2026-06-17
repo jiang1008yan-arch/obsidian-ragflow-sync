@@ -53,7 +53,19 @@ export interface ApplyResult {
 	ok: number;
 	failed: number;
 	errors: string[];
+	/** Documents queued for parsing in RAGFlow (0 when auto-parse is off). */
+	parsed: number;
 }
+
+/**
+ * Companion-metadata lookup for one apply run: source folder -> (linked-file
+ * key -> that note's frontmatter). Built per run and passed down rather than
+ * held as engine state, so concurrent runs cannot clobber one another.
+ */
+type CompanionIndex = Map<string, Map<string, Record<string, unknown>>>;
+
+/** State written at most once per this many processed files during a sync. */
+const FLUSH_EVERY = 25;
 
 /**
  * Orchestrates the sync: builds the vault snapshot, drives the pure Diff,
@@ -66,14 +78,6 @@ export class SyncEngine {
 	private client: RagflowClient;
 	private store: SyncStateStore;
 	private getSettings: () => RagflowSyncSettings;
-	/**
-	 * Per-run companion-metadata lookup, built at the start of applyChanges and
-	 * cleared at the end: source folder -> (linked-file path -> that note's
-	 * frontmatter). Null outside an apply run.
-	 */
-	private companionIndex:
-		| Map<string, Map<string, Record<string, unknown>>>
-		| null = null;
 
 	constructor(
 		app: App,
@@ -93,6 +97,7 @@ export class SyncEngine {
 			mappings: s.datasetMappings,
 			extensions: s.extensions,
 			excludeGlobs: s.excludeGlobs,
+			ignored: new Set(s.ignoredPaths),
 			processingVersion: PROCESSING_VERSION,
 		};
 	}
@@ -137,14 +142,15 @@ export class SyncEngine {
 
 		// Apply touch refreshes explicitly (no longer a hidden write inside the
 		// classification): identical content, drifted stats -> refresh to keep
-		// the next diff on the fast path.
+		// the next diff on the fast path. Mutated in memory, then persisted once.
 		for (const touch of hashed.touches) {
-			await this.store.setFile(touch.vaultPath, {
+			this.store.setFile(touch.vaultPath, {
 				...touch.record,
 				size: touch.size,
 				mtime: touch.mtime,
 			});
 		}
+		await this.store.flush();
 
 		return {
 			changes: assembleChanges(stat, hashed),
@@ -165,23 +171,34 @@ export class SyncEngine {
 	): Promise<ApplyResult> {
 		const actionable = changes.filter((c) => c.kind !== "unchanged");
 		let done = 0;
-		const result: ApplyResult = { ok: 0, failed: 0, errors: [] };
+		const result: ApplyResult = { ok: 0, failed: 0, errors: [], parsed: 0 };
 
-		this.companionIndex = await this.buildCompanionIndex();
+		// Document ids uploaded this run, grouped by dataset, so a single parse
+		// request per dataset can kick them all off once the uploads finish.
+		const uploaded = new Map<string, string[]>();
+
+		const companionIndex = await this.buildCompanionIndex();
+		let sinceFlush = 0;
 		try {
 			for (const change of actionable) {
 				try {
 					if (change.kind === "new") {
-						await this.syncUpload(change, undefined);
+						const up = await this.syncUpload(change, undefined, companionIndex);
+						this.recordUpload(uploaded, up);
 					} else if (change.kind === "modified") {
-						await this.syncUpload(change, change.record);
+						const up = await this.syncUpload(
+							change,
+							change.record,
+							companionIndex
+						);
+						this.recordUpload(uploaded, up);
 					} else if (change.kind === "deleted") {
 						if (change.record) {
 							await this.client.deleteDocuments(change.record.datasetId, [
 								change.record.documentId,
 							]);
 						}
-						await this.store.deleteFile(change.vaultPath);
+						this.store.deleteFile(change.vaultPath);
 					}
 					result.ok += 1;
 				} catch (e) {
@@ -189,18 +206,55 @@ export class SyncEngine {
 					result.errors.push(`${change.vaultPath}: ${(e as Error).message}`);
 				}
 				done += 1;
+				// Persist periodically so a crash mid-sync cannot leave a document
+				// uploaded to RAGFlow without a local record (which would re-upload
+				// it as a duplicate next run); the finally below persists the rest.
+				if (++sinceFlush >= FLUSH_EVERY) {
+					await this.store.flush();
+					sinceFlush = 0;
+				}
 				onProgress?.(done, actionable.length, change.vaultPath);
 			}
 		} finally {
-			this.companionIndex = null;
+			await this.store.flush();
 		}
+
+		// Auto-parse: hand the freshly uploaded documents to RAGFlow for parsing
+		// with each dataset's configured chunking method. A parse failure is
+		// reported but does not undo the upload — the documents are in RAGFlow and
+		// can be parsed manually.
+		if (this.getSettings().autoParse) {
+			for (const [datasetId, ids] of uploaded) {
+				onProgress?.(done, actionable.length, `Parsing ${ids.length} document(s)…`);
+				try {
+					await this.client.parseDocuments(datasetId, ids);
+					result.parsed += ids.length;
+				} catch (e) {
+					result.errors.push(
+						`parse (dataset ${datasetId}): ${(e as Error).message}`
+					);
+				}
+			}
+		}
+
 		return result;
+	}
+
+	/** Group an uploaded document id under its dataset for the parse step. */
+	private recordUpload(
+		uploaded: Map<string, string[]>,
+		up: { datasetId: string; documentId: string }
+	): void {
+		const ids = uploaded.get(up.datasetId);
+		if (ids) ids.push(up.documentId);
+		else uploaded.set(up.datasetId, [up.documentId]);
 	}
 
 	private async syncUpload(
 		change: FileChange,
-		oldRecord: SyncedFileRecord | undefined
-	): Promise<void> {
+		oldRecord: SyncedFileRecord | undefined,
+		companionIndex: CompanionIndex
+	): Promise<{ datasetId: string; documentId: string }> {
 		const file = this.app.vault.getAbstractFileByPath(change.vaultPath);
 		if (!(file instanceof TFile)) {
 			throw new Error("File no longer exists in vault.");
@@ -236,7 +290,7 @@ export class SyncEngine {
 		// own metadata, and files no source note links to, are left as-is.
 		const sourceFolder = change.mapping?.companionSourceFolder;
 		if (Object.keys(meta).length === 0 && sourceFolder) {
-			const found = this.lookupCompanion(sourceFolder, file);
+			const found = this.lookupCompanion(companionIndex, sourceFolder, file);
 			if (found) {
 				meta = found;
 			} else {
@@ -274,7 +328,7 @@ export class SyncEngine {
 			}
 		}
 
-		await this.store.setFile(change.vaultPath, {
+		this.store.setFile(change.vaultPath, {
 			documentId: doc.id,
 			datasetId,
 			hash,
@@ -291,6 +345,8 @@ export class SyncEngine {
 					`(document kept; metadata will be retried on the next scan)`
 			);
 		}
+
+		return { datasetId, documentId: doc.id };
 	}
 
 	/**
@@ -338,10 +394,8 @@ export class SyncEngine {
 	 * indexed under several keys (see indexCompanionTarget) so resolution survives
 	 * a link that carries an extension, omits one, or does not resolve uniquely.
 	 */
-	private async buildCompanionIndex(): Promise<
-		Map<string, Map<string, Record<string, unknown>>>
-	> {
-		const index = new Map<string, Map<string, Record<string, unknown>>>();
+	private async buildCompanionIndex(): Promise<CompanionIndex> {
+		const index: CompanionIndex = new Map();
 		const folders = new Set(
 			this.getSettings()
 				.datasetMappings.map((m) => m.companionSourceFolder)
@@ -427,10 +481,11 @@ export class SyncEngine {
 	 * single source note that links to the whole document.
 	 */
 	private lookupCompanion(
+		companionIndex: CompanionIndex,
 		sourceFolder: string,
 		file: TFile
 	): Record<string, unknown> | undefined {
-		const map = this.companionIndex?.get(sourceFolder);
+		const map = companionIndex.get(sourceFolder);
 		if (!map) return undefined;
 		const direct =
 			map.get(file.path) ??

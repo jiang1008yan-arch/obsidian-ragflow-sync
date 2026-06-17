@@ -2,10 +2,19 @@ import { ItemView, Notice, WorkspaceLeaf } from "obsidian";
 import type RagflowSyncPlugin from "./main";
 import { ChangeKind, FileChange } from "./types";
 import { summarize } from "./syncEngine";
+import {
+	allFolderPaths,
+	buildTree,
+	changeSummary,
+	foldersWithChanges,
+	isFileLeaf,
+	leavesOf,
+	sortedChildren,
+	TreeNode,
+} from "./tree";
 
 export const VIEW_TYPE_RAGFLOW_SYNC = "ragflow-sync-view";
 
-const KIND_ORDER: ChangeKind[] = ["new", "modified", "deleted", "unchanged"];
 const KIND_LABEL: Record<ChangeKind, string> = {
 	new: "New",
 	modified: "Modified",
@@ -20,14 +29,13 @@ export class RagflowSyncView extends ItemView {
 	private busy = false;
 	/** Vault paths the user has ticked for a manual re-upload. */
 	private selected: Set<string> = new Set();
-	/**
-	 * Selection mode is the manual re-upload flow: only here do per-file
-	 * checkboxes appear. The default (audit) view stays checkbox-free — Scan diff
-	 * just reports the diff and Sync all/Sync these act on it automatically.
-	 */
-	private selectionMode = false;
-	/** The "Re-sync selected" button, kept so its label can update live. */
-	private resyncBtn: HTMLButtonElement | null = null;
+	/** Folder paths currently expanded in the tree. */
+	private expanded: Set<string> = new Set();
+	/** Whether the "Ignored" section at the bottom is expanded. */
+	private ignoredExpanded = false;
+	/** Selection-dependent buttons, kept so their labels can update live. */
+	private syncSelectedBtn: HTMLButtonElement | null = null;
+	private ignoreSelectedBtn: HTMLButtonElement | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: RagflowSyncPlugin) {
 		super(leaf);
@@ -69,10 +77,10 @@ export class RagflowSyncView extends ItemView {
 		try {
 			const result = await this.plugin.engine.computeDiff();
 			this.changes = result.changes;
-			// A fresh scan is an audit: drop any prior selection and leave
-			// selection mode so the diff is shown checkbox-free.
+			// A fresh scan is a clean slate: drop any prior selection and expand the
+			// folders that hold actionable changes so they are visible at a glance.
 			this.selected.clear();
-			this.selectionMode = false;
+			this.expanded = foldersWithChanges(this.changes);
 			if (result.missingMappings.length > 0) {
 				new Notice(
 					`Some mapped folders were not found: ${result.missingMappings
@@ -148,6 +156,7 @@ export class RagflowSyncView extends ItemView {
 				}
 			);
 			let msg = `Synced ${result.ok} item(s).`;
+			if (result.parsed > 0) msg += ` Parsing ${result.parsed}.`;
 			if (result.failed > 0) msg += ` ${result.failed} failed.`;
 			new Notice(msg);
 			if (result.errors.length > 0) {
@@ -161,12 +170,47 @@ export class RagflowSyncView extends ItemView {
 		}
 	}
 
+	/**
+	 * Freeze the ticked files: add them to the persistent ignore list so the Diff
+	 * skips them — never uploaded, and any already-synced document left in place.
+	 * Dropped from the current diff view without a re-scan; they reappear under
+	 * "Ignored" where they can be un-ignored.
+	 */
+	async ignoreSelected(): Promise<void> {
+		if (this.selected.size === 0) {
+			new Notice("No files selected. Tick the files you want to ignore.");
+			return;
+		}
+		const picked = this.selected;
+		const merged = new Set(this.plugin.settings.ignoredPaths);
+		for (const path of picked) merged.add(path);
+		this.plugin.settings.ignoredPaths = [...merged].sort((a, b) =>
+			a.localeCompare(b)
+		);
+		await this.plugin.saveSettings();
+
+		this.changes = this.changes.filter((c) => !picked.has(c.vaultPath));
+		this.selected = new Set();
+		this.render();
+		new Notice(`Ignoring ${picked.size} file(s).`);
+	}
+
+	/** Un-freeze one path, then re-scan so it re-enters the diff classified. */
+	async unignore(path: string): Promise<void> {
+		this.plugin.settings.ignoredPaths =
+			this.plugin.settings.ignoredPaths.filter((p) => p !== path);
+		await this.plugin.saveSettings();
+		this.render();
+		await this.scan();
+	}
+
 	private render(): void {
 		const container = this.containerEl.children[1] as HTMLElement;
 		container.empty();
 		container.addClass("ragflow-sync-view");
 
-		this.resyncBtn = null;
+		this.syncSelectedBtn = null;
+		this.ignoreSelectedBtn = null;
 		const toolbar = container.createDiv({ cls: "ragflow-sync-toolbar" });
 		this.renderToolbar(toolbar);
 
@@ -177,126 +221,194 @@ export class RagflowSyncView extends ItemView {
 				cls: "ragflow-sync-empty",
 				text: 'No scan results yet. Click "Scan diff" to compare your vault with RAGFlow.',
 			});
-			return;
+		} else {
+			const tree = container.createDiv({ cls: "ragflow-sync-tree" });
+			const root = buildTree(this.changes);
+			this.renderChildren(tree, root, 0);
 		}
 
-		const byKind = new Map<ChangeKind, FileChange[]>();
-		for (const kind of KIND_ORDER) byKind.set(kind, []);
-		for (const change of this.changes) byKind.get(change.kind)!.push(change);
-
-		for (const kind of KIND_ORDER) {
-			const list = byKind.get(kind)!;
-			if (list.length > 0) this.renderGroup(container, kind, list);
-		}
-
+		this.renderIgnored(container);
 		this.updateSelectionUi();
 	}
 
-	/**
-	 * The toolbar differs by mode. Audit (default): Scan diff, Sync all, and an
-	 * entry into selection mode. Selection: confirm the ticked re-sync, or cancel
-	 * back to the audit view.
-	 */
 	private renderToolbar(toolbar: HTMLElement): void {
 		const scanBtn = toolbar.createEl("button", { text: "Scan diff" });
 		scanBtn.onclick = () => void this.scan();
-
-		if (this.selectionMode) {
-			this.resyncBtn = toolbar.createEl("button", {
-				text: "Re-sync selected",
-			});
-			this.resyncBtn.onclick = () => void this.syncSelected();
-
-			const cancelBtn = toolbar.createEl("button", { text: "Cancel" });
-			cancelBtn.onclick = () => {
-				this.selectionMode = false;
-				this.selected.clear();
-				this.render();
-			};
-			return;
-		}
 
 		const syncAllBtn = toolbar.createEl("button", { text: "Sync all" });
 		syncAllBtn.addClass("mod-cta");
 		syncAllBtn.onclick = () => void this.syncChanges(this.changes);
 
+		this.syncSelectedBtn = toolbar.createEl("button", { text: "Sync selected" });
+		this.syncSelectedBtn.onclick = () => void this.syncSelected();
+
+		this.ignoreSelectedBtn = toolbar.createEl("button", {
+			text: "Ignore selected",
+		});
+		this.ignoreSelectedBtn.onclick = () => void this.ignoreSelected();
+
 		if (this.changes.length > 0) {
-			const selectBtn = toolbar.createEl("button", {
-				text: "Re-sync selected…",
-			});
-			selectBtn.onclick = () => {
-				this.selectionMode = true;
-				this.selected.clear();
+			const expandBtn = toolbar.createEl("button", { text: "Expand all" });
+			expandBtn.onclick = () => {
+				this.expanded = allFolderPaths(this.changes);
+				this.render();
+			};
+			const collapseBtn = toolbar.createEl("button", { text: "Collapse all" });
+			collapseBtn.onclick = () => {
+				this.expanded.clear();
 				this.render();
 			};
 		}
 	}
 
-	private renderGroup(
-		container: HTMLElement,
-		kind: ChangeKind,
-		list: FileChange[]
+	/** Render the folders-then-files under a node, sorted, at the given depth. */
+	private renderChildren(
+		parent: HTMLElement,
+		node: TreeNode,
+		depth: number
 	): void {
-		const group = container.createDiv({ cls: "ragflow-sync-group" });
-		const header = group.createDiv({ cls: "ragflow-sync-group-header" });
-
-		if (this.selectionMode) {
-			// Group-level "select all": tick every file in this group at once.
-			const groupToggle = header.createEl("label", {
-				cls: "ragflow-sync-group-toggle",
-			});
-			const groupBox = groupToggle.createEl("input", { type: "checkbox" });
-			groupBox.checked = list.every((c) => this.selected.has(c.vaultPath));
-			groupBox.onchange = () => {
-				for (const c of list) {
-					if (groupBox.checked) this.selected.add(c.vaultPath);
-					else this.selected.delete(c.vaultPath);
-				}
-				this.render();
-			};
-			groupToggle.createSpan({ text: `${KIND_LABEL[kind]} (${list.length})` });
-		} else {
-			header.createSpan({ text: `${KIND_LABEL[kind]} (${list.length})` });
-			// Audit view: actionable groups sync automatically, no ticking needed.
-			if (kind !== "unchanged") {
-				const btn = header.createEl("button", { text: "Sync these" });
-				btn.onclick = () => void this.syncChanges(list);
-			}
-		}
-
-		for (const change of list) {
-			const item = group.createDiv({ cls: "ragflow-sync-item" });
-			const main = item.createDiv({ cls: "ragflow-sync-item-main" });
-
-			if (this.selectionMode) {
-				const box = main.createEl("input", { type: "checkbox" });
-				box.checked = this.selected.has(change.vaultPath);
-				box.onchange = () => {
-					if (box.checked) this.selected.add(change.vaultPath);
-					else this.selected.delete(change.vaultPath);
-					this.updateSelectionUi();
-				};
-			}
-
-			main.createDiv({
-				cls: "ragflow-sync-item-path",
-				text: change.vaultPath,
-			});
-			item.createSpan({
-				cls: `ragflow-sync-badge ${kind}`,
-				text: KIND_LABEL[kind],
-			});
+		for (const child of sortedChildren(node)) {
+			if (isFileLeaf(child)) this.renderFile(parent, child, depth);
+			else this.renderFolder(parent, child, depth);
 		}
 	}
 
-	/** Reflect the current tick count on the "Re-sync selected" button. */
+	private renderFolder(
+		parent: HTMLElement,
+		node: TreeNode,
+		depth: number
+	): void {
+		const leaves = leavesOf(node);
+		const expanded = this.expanded.has(node.path);
+
+		const row = parent.createDiv({ cls: "ragflow-tree-row ragflow-tree-folder" });
+		row.style.paddingLeft = `${depth * 16}px`;
+
+		const twisty = row.createSpan({
+			cls: "ragflow-tree-twisty",
+			text: expanded ? "▾" : "▸",
+		});
+		twisty.onclick = (e) => {
+			e.stopPropagation();
+			this.toggleFolder(node.path);
+		};
+
+		const box = row.createEl("input", { type: "checkbox" });
+		const picked = leaves.filter((l) => this.selected.has(l.path)).length;
+		box.checked = picked > 0 && picked === leaves.length;
+		box.indeterminate = picked > 0 && picked < leaves.length;
+		box.onclick = (e) => e.stopPropagation();
+		box.onchange = () => {
+			for (const leaf of leaves) {
+				if (box.checked) this.selected.add(leaf.path);
+				else this.selected.delete(leaf.path);
+			}
+			this.render();
+		};
+
+		const label = row.createDiv({ cls: "ragflow-tree-name" });
+		label.setText(node.name);
+		label.onclick = () => this.toggleFolder(node.path);
+
+		const summary = changeSummary(leaves);
+		if (summary) {
+			row.createSpan({ cls: "ragflow-tree-count", text: summary });
+		}
+
+		if (expanded) {
+			const childWrap = parent.createDiv({ cls: "ragflow-tree-children" });
+			this.renderChildren(childWrap, node, depth + 1);
+		}
+	}
+
+	private renderFile(
+		parent: HTMLElement,
+		node: TreeNode,
+		depth: number
+	): void {
+		const change = node.change!;
+		const row = parent.createDiv({ cls: "ragflow-tree-row ragflow-tree-file" });
+		// Indent past the folder twisty so files line up under the folder name.
+		row.style.paddingLeft = `${depth * 16 + 16}px`;
+
+		const box = row.createEl("input", { type: "checkbox" });
+		box.checked = this.selected.has(change.vaultPath);
+		box.onchange = () => {
+			if (box.checked) this.selected.add(change.vaultPath);
+			else this.selected.delete(change.vaultPath);
+			// A file's tick changes its folders' tri-state, so re-render the tree.
+			this.render();
+		};
+
+		row.createDiv({ cls: "ragflow-tree-name", text: node.name });
+		row.createSpan({
+			cls: `ragflow-sync-badge ${change.kind}`,
+			text: KIND_LABEL[change.kind],
+		});
+	}
+
+	/** Collapsible list of ignored (frozen) paths, each with an un-ignore action. */
+	private renderIgnored(container: HTMLElement): void {
+		const paths = this.plugin.settings.ignoredPaths;
+		if (paths.length === 0) return;
+
+		const section = container.createDiv({ cls: "ragflow-sync-ignored" });
+		const header = section.createDiv({ cls: "ragflow-tree-row ragflow-ignored-header" });
+		const twisty = header.createSpan({
+			cls: "ragflow-tree-twisty",
+			text: this.ignoredExpanded ? "▾" : "▸",
+		});
+		twisty.onclick = () => this.toggleIgnored();
+		const label = header.createDiv({ cls: "ragflow-tree-name" });
+		label.setText(`Ignored (${paths.length})`);
+		label.onclick = () => this.toggleIgnored();
+
+		const unignoreAll = header.createEl("button", { text: "Un-ignore all" });
+		unignoreAll.onclick = async () => {
+			this.plugin.settings.ignoredPaths = [];
+			await this.plugin.saveSettings();
+			this.render();
+			await this.scan();
+		};
+
+		if (!this.ignoredExpanded) return;
+		const list = section.createDiv({ cls: "ragflow-tree-children" });
+		for (const path of paths) {
+			const row = list.createDiv({ cls: "ragflow-tree-row ragflow-tree-file" });
+			row.style.paddingLeft = "16px";
+			row.createDiv({ cls: "ragflow-tree-name", text: path });
+			const btn = row.createEl("button", { text: "Un-ignore" });
+			btn.onclick = () => void this.unignore(path);
+		}
+	}
+
+	private toggleIgnored(): void {
+		this.ignoredExpanded = !this.ignoredExpanded;
+		this.render();
+	}
+
+	private toggleFolder(path: string): void {
+		if (this.expanded.has(path)) this.expanded.delete(path);
+		else this.expanded.add(path);
+		this.render();
+	}
+
+	/** Reflect the current tick count on the selection-dependent buttons. */
 	private updateSelectionUi(): void {
-		if (!this.resyncBtn) return;
 		const n = this.selected.size;
-		this.resyncBtn.setText(
-			n > 0 ? `Re-sync selected (${n})` : "Re-sync selected"
-		);
-		this.resyncBtn.toggleClass("mod-warning", n > 0);
-		this.resyncBtn.disabled = n === 0;
+		if (this.syncSelectedBtn) {
+			this.syncSelectedBtn.setText(
+				n > 0 ? `Sync selected (${n})` : "Sync selected"
+			);
+			this.syncSelectedBtn.toggleClass("mod-warning", n > 0);
+			this.syncSelectedBtn.disabled = n === 0;
+		}
+		if (this.ignoreSelectedBtn) {
+			this.ignoreSelectedBtn.setText(
+				n > 0 ? `Ignore selected (${n})` : "Ignore selected"
+			);
+			this.ignoreSelectedBtn.disabled = n === 0;
+		}
 	}
+
 }

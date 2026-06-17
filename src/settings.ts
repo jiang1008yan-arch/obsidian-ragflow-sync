@@ -14,8 +14,10 @@ export const DEFAULT_SETTINGS: RagflowSyncSettings = {
 	datasetMappings: [],
 	extensions: ["md", "pdf", "docx"],
 	excludeGlobs: [".trash", ".obsidian"],
+	ignoredPaths: [],
 	internalizeLinks: false,
 	normalizeTables: true,
+	autoParse: true,
 	state: { files: {} },
 };
 
@@ -67,6 +69,8 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.ragflowBaseUrl)
 					.onChange(async (value) => {
 						this.plugin.settings.ragflowBaseUrl = value.trim();
+						// Connection target changed: drop caches built against the old one.
+						this.plugin.client.invalidate();
 						await this.plugin.saveSettings();
 					})
 			);
@@ -81,6 +85,7 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.apiKey)
 					.onChange(async (value) => {
 						this.plugin.settings.apiKey = value.trim();
+						this.plugin.client.invalidate();
 						await this.plugin.saveSettings();
 					});
 			});
@@ -93,6 +98,9 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 					btn.setDisabled(true);
 					btn.setButtonText("Testing...");
 					try {
+						// Force a real request, not a cached answer, so the test reflects
+						// the current URL/key.
+						this.plugin.client.invalidate();
 						await this.plugin.client.listDatasets();
 						new Notice("RAGFlow connection OK.");
 					} catch (e) {
@@ -162,6 +170,22 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.normalizeTables)
 					.onChange(async (value) => {
 						this.plugin.settings.normalizeTables = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		containerEl.createEl("h2", { text: "Parsing" });
+
+		new Setting(containerEl)
+			.setName("Auto-parse after upload")
+			.setDesc(
+				"After a sync uploads documents, automatically start parsing them in RAGFlow using each dataset's own configured chunking method. Turn this off to leave uploaded documents unparsed and parse them yourself in RAGFlow."
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.autoParse)
+					.onChange(async (value) => {
+						this.plugin.settings.autoParse = value;
 						await this.plugin.saveSettings();
 					})
 			);

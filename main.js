@@ -65,8 +65,10 @@ var DEFAULT_SETTINGS = {
   datasetMappings: [],
   extensions: ["md", "pdf", "docx"],
   excludeGlobs: [".trash", ".obsidian"],
+  ignoredPaths: [],
   internalizeLinks: false,
   normalizeTables: true,
+  autoParse: true,
   state: { files: {} }
 };
 var RagflowSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
@@ -99,6 +101,7 @@ var RagflowSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
     new import_obsidian2.Setting(containerEl).setName("RAGFlow base URL").setDesc("e.g. http://127.0.0.1:9380 (no trailing /api/v1).").addText(
       (text) => text.setPlaceholder("http://127.0.0.1:9380").setValue(this.plugin.settings.ragflowBaseUrl).onChange(async (value) => {
         this.plugin.settings.ragflowBaseUrl = value.trim();
+        this.plugin.client.invalidate();
         await this.plugin.saveSettings();
       })
     );
@@ -106,6 +109,7 @@ var RagflowSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
       text.inputEl.type = "password";
       text.setPlaceholder("ragflow-xxxxxxxx").setValue(this.plugin.settings.apiKey).onChange(async (value) => {
         this.plugin.settings.apiKey = value.trim();
+        this.plugin.client.invalidate();
         await this.plugin.saveSettings();
       });
     });
@@ -114,6 +118,7 @@ var RagflowSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
         btn.setDisabled(true);
         btn.setButtonText("Testing...");
         try {
+          this.plugin.client.invalidate();
           await this.plugin.client.listDatasets();
           new import_obsidian2.Notice("RAGFlow connection OK.");
         } catch (e) {
@@ -151,6 +156,15 @@ var RagflowSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
     ).addToggle(
       (toggle) => toggle.setValue(this.plugin.settings.normalizeTables).onChange(async (value) => {
         this.plugin.settings.normalizeTables = value;
+        await this.plugin.saveSettings();
+      })
+    );
+    containerEl.createEl("h2", { text: "Parsing" });
+    new import_obsidian2.Setting(containerEl).setName("Auto-parse after upload").setDesc(
+      "After a sync uploads documents, automatically start parsing them in RAGFlow using each dataset's own configured chunking method. Turn this off to leave uploaded documents unparsed and parse them yourself in RAGFlow."
+    ).addToggle(
+      (toggle) => toggle.setValue(this.plugin.settings.autoParse).onChange(async (value) => {
+        this.plugin.settings.autoParse = value;
         await this.plugin.saveSettings();
       })
     );
@@ -311,6 +325,16 @@ var RagflowClient = class {
     this.datasetIdByName = /* @__PURE__ */ new Map();
     this.getSettings = getSettings;
   }
+  /**
+   * Drop the cached dataset list and name->id map. The client lives for the
+   * whole plugin session, so this must be called when the connection settings
+   * (base URL / API key) change — otherwise a later list or a "Test connection"
+   * would answer from a cache built against the old server.
+   */
+  invalidate() {
+    this.datasetsCache = null;
+    this.datasetIdByName.clear();
+  }
   base() {
     const url = this.getSettings().ragflowBaseUrl.replace(/\/+$/, "");
     return `${url}/api/v1`;
@@ -455,6 +479,22 @@ var RagflowClient = class {
       body: JSON.stringify({ meta_fields: meta })
     });
   }
+  /**
+   * Start parsing the given documents in a dataset (RAGFlow "Parse documents":
+   * POST /datasets/{id}/chunks). RAGFlow uses the dataset's own configured
+   * chunking method; parsing then runs asynchronously on the server. Returns as
+   * soon as the job is accepted, not when parsing completes.
+   */
+  async parseDocuments(datasetId, ids) {
+    if (ids.length === 0)
+      return;
+    await this.send({
+      url: `${this.base()}/datasets/${datasetId}/chunks`,
+      method: "POST",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ document_ids: ids })
+    });
+  }
   async deleteDocuments(datasetId, ids) {
     if (ids.length === 0)
       return;
@@ -470,6 +510,7 @@ var RagflowClient = class {
 // src/syncState.ts
 var SyncStateStore = class {
   constructor(state, save) {
+    this.dirty = false;
     this.state = state;
     this.save = save;
   }
@@ -479,12 +520,21 @@ var SyncStateStore = class {
   allFiles() {
     return this.state.files;
   }
-  async setFile(vaultPath, record) {
+  /** Upsert a record in memory; call flush() to persist. */
+  setFile(vaultPath, record) {
     this.state.files[vaultPath] = record;
-    await this.save();
+    this.dirty = true;
   }
-  async deleteFile(vaultPath) {
+  /** Remove a record in memory; call flush() to persist. */
+  deleteFile(vaultPath) {
     delete this.state.files[vaultPath];
+    this.dirty = true;
+  }
+  /** Persist pending mutations, if any. A no-op when nothing changed. */
+  async flush() {
+    if (!this.dirty)
+      return;
+    this.dirty = false;
     await this.save();
   }
 };
@@ -540,6 +590,8 @@ function classifyByStat(snapshot, state, scope) {
   };
   const inScopePaths = /* @__PURE__ */ new Set();
   for (const entry of snapshot) {
+    if (scope.ignored?.has(entry.path))
+      continue;
     const mapping = isInScope(entry.path, scope);
     if (!mapping)
       continue;
@@ -559,6 +611,8 @@ function classifyByStat(snapshot, state, scope) {
   }
   for (const [vaultPath, record] of Object.entries(state.files)) {
     if (inScopePaths.has(vaultPath))
+      continue;
+    if (scope.ignored?.has(vaultPath))
       continue;
     result.deletions.push({
       vaultPath,
@@ -936,14 +990,9 @@ var CONTENT_TYPES = {
   jpeg: "image/jpeg",
   gif: "image/gif"
 };
+var FLUSH_EVERY = 25;
 var SyncEngine = class {
   constructor(app, client, store, getSettings) {
-    /**
-     * Per-run companion-metadata lookup, built at the start of applyChanges and
-     * cleared at the end: source folder -> (linked-file path -> that note's
-     * frontmatter). Null outside an apply run.
-     */
-    this.companionIndex = null;
     this.app = app;
     this.client = client;
     this.store = store;
@@ -955,6 +1004,7 @@ var SyncEngine = class {
       mappings: s.datasetMappings,
       extensions: s.extensions,
       excludeGlobs: s.excludeGlobs,
+      ignored: new Set(s.ignoredPaths),
       processingVersion: PROCESSING_VERSION
     };
   }
@@ -988,12 +1038,13 @@ var SyncEngine = class {
     }
     const hashed = finalizeWithHashes(stat.needHash, hashes);
     for (const touch of hashed.touches) {
-      await this.store.setFile(touch.vaultPath, {
+      this.store.setFile(touch.vaultPath, {
         ...touch.record,
         size: touch.size,
         mtime: touch.mtime
       });
     }
+    await this.store.flush();
     return {
       changes: assembleChanges(stat, hashed),
       missingMappings: this.missingMappings()
@@ -1008,22 +1059,30 @@ var SyncEngine = class {
   async applyChanges(changes, onProgress) {
     const actionable = changes.filter((c) => c.kind !== "unchanged");
     let done = 0;
-    const result = { ok: 0, failed: 0, errors: [] };
-    this.companionIndex = await this.buildCompanionIndex();
+    const result = { ok: 0, failed: 0, errors: [], parsed: 0 };
+    const uploaded = /* @__PURE__ */ new Map();
+    const companionIndex = await this.buildCompanionIndex();
+    let sinceFlush = 0;
     try {
       for (const change of actionable) {
         try {
           if (change.kind === "new") {
-            await this.syncUpload(change, void 0);
+            const up = await this.syncUpload(change, void 0, companionIndex);
+            this.recordUpload(uploaded, up);
           } else if (change.kind === "modified") {
-            await this.syncUpload(change, change.record);
+            const up = await this.syncUpload(
+              change,
+              change.record,
+              companionIndex
+            );
+            this.recordUpload(uploaded, up);
           } else if (change.kind === "deleted") {
             if (change.record) {
               await this.client.deleteDocuments(change.record.datasetId, [
                 change.record.documentId
               ]);
             }
-            await this.store.deleteFile(change.vaultPath);
+            this.store.deleteFile(change.vaultPath);
           }
           result.ok += 1;
         } catch (e) {
@@ -1031,14 +1090,39 @@ var SyncEngine = class {
           result.errors.push(`${change.vaultPath}: ${e.message}`);
         }
         done += 1;
+        if (++sinceFlush >= FLUSH_EVERY) {
+          await this.store.flush();
+          sinceFlush = 0;
+        }
         onProgress?.(done, actionable.length, change.vaultPath);
       }
     } finally {
-      this.companionIndex = null;
+      await this.store.flush();
+    }
+    if (this.getSettings().autoParse) {
+      for (const [datasetId, ids] of uploaded) {
+        onProgress?.(done, actionable.length, `Parsing ${ids.length} document(s)\u2026`);
+        try {
+          await this.client.parseDocuments(datasetId, ids);
+          result.parsed += ids.length;
+        } catch (e) {
+          result.errors.push(
+            `parse (dataset ${datasetId}): ${e.message}`
+          );
+        }
+      }
     }
     return result;
   }
-  async syncUpload(change, oldRecord) {
+  /** Group an uploaded document id under its dataset for the parse step. */
+  recordUpload(uploaded, up) {
+    const ids = uploaded.get(up.datasetId);
+    if (ids)
+      ids.push(up.documentId);
+    else
+      uploaded.set(up.datasetId, [up.documentId]);
+  }
+  async syncUpload(change, oldRecord, companionIndex) {
     const file = this.app.vault.getAbstractFileByPath(change.vaultPath);
     if (!(file instanceof import_obsidian4.TFile)) {
       throw new Error("File no longer exists in vault.");
@@ -1059,7 +1143,7 @@ var SyncEngine = class {
     let meta = prepared.meta;
     const sourceFolder = change.mapping?.companionSourceFolder;
     if (Object.keys(meta).length === 0 && sourceFolder) {
-      const found = this.lookupCompanion(sourceFolder, file);
+      const found = this.lookupCompanion(companionIndex, sourceFolder, file);
       if (found) {
         meta = found;
       } else {
@@ -1089,7 +1173,7 @@ var SyncEngine = class {
         );
       }
     }
-    await this.store.setFile(change.vaultPath, {
+    this.store.setFile(change.vaultPath, {
       documentId: doc.id,
       datasetId,
       hash,
@@ -1104,6 +1188,7 @@ var SyncEngine = class {
         `uploaded, but setting metadata failed: ${metaError.message} (document kept; metadata will be retried on the next scan)`
       );
     }
+    return { datasetId, documentId: doc.id };
   }
   /**
    * Decode a Markdown file, strip its YAML frontmatter (parsed out as metadata),
@@ -1211,8 +1296,8 @@ var SyncEngine = class {
    * its stem, so an oversized document carved into page-range parts can share a
    * single source note that links to the whole document.
    */
-  lookupCompanion(sourceFolder, file) {
-    const map = this.companionIndex?.get(sourceFolder);
+  lookupCompanion(companionIndex, sourceFolder, file) {
+    const map = companionIndex.get(sourceFolder);
     if (!map)
       return void 0;
     const direct = map.get(file.path) ?? map.get(`name:${file.name.toLowerCase()}`) ?? map.get(`base:${file.basename.toLowerCase()}`);
@@ -1253,8 +1338,94 @@ function summarize(changes) {
 
 // src/statusView.ts
 var import_obsidian5 = require("obsidian");
+
+// src/tree.ts
+function buildTree(changes) {
+  const root = { name: "", path: "", children: /* @__PURE__ */ new Map() };
+  for (const change of changes) {
+    const parts = change.vaultPath.split("/");
+    let node = root;
+    let acc = "";
+    parts.forEach((part, i) => {
+      acc = acc ? `${acc}/${part}` : part;
+      let child = node.children.get(part);
+      if (!child) {
+        child = { name: part, path: acc, children: /* @__PURE__ */ new Map() };
+        node.children.set(part, child);
+      }
+      if (i === parts.length - 1)
+        child.change = change;
+      node = child;
+    });
+  }
+  return root;
+}
+function isFileLeaf(node) {
+  return !!node.change && node.children.size === 0;
+}
+function sortedChildren(node) {
+  return [...node.children.values()].sort((a, b) => {
+    const aFolder = a.children.size > 0;
+    const bFolder = b.children.size > 0;
+    if (aFolder !== bFolder)
+      return aFolder ? -1 : 1;
+    return a.name.localeCompare(b.name);
+  });
+}
+function leavesOf(node) {
+  if (isFileLeaf(node))
+    return [node];
+  const out = [];
+  for (const child of node.children.values())
+    out.push(...leavesOf(child));
+  return out;
+}
+function changeSummary(leaves) {
+  const counts = {
+    new: 0,
+    modified: 0,
+    deleted: 0,
+    unchanged: 0
+  };
+  for (const leaf of leaves) {
+    if (leaf.change)
+      counts[leaf.change.kind] += 1;
+  }
+  const parts = [];
+  if (counts.new)
+    parts.push(`${counts.new} new`);
+  if (counts.modified)
+    parts.push(`${counts.modified} modified`);
+  if (counts.deleted)
+    parts.push(`${counts.deleted} deleted`);
+  return parts.join(", ");
+}
+function addAncestorFolders(vaultPath, set) {
+  const parts = vaultPath.split("/");
+  let acc = "";
+  for (let i = 0; i < parts.length - 1; i++) {
+    acc = acc ? `${acc}/${parts[i]}` : parts[i];
+    set.add(acc);
+  }
+}
+function foldersWithChanges(changes) {
+  const set = /* @__PURE__ */ new Set();
+  for (const change of changes) {
+    if (change.kind === "unchanged")
+      continue;
+    addAncestorFolders(change.vaultPath, set);
+  }
+  return set;
+}
+function allFolderPaths(changes) {
+  const set = /* @__PURE__ */ new Set();
+  for (const change of changes)
+    addAncestorFolders(change.vaultPath, set);
+  return set;
+}
+
+// src/statusView.ts
 var VIEW_TYPE_RAGFLOW_SYNC = "ragflow-sync-view";
-var KIND_ORDER = ["new", "modified", "deleted", "unchanged"];
 var KIND_LABEL = {
   new: "New",
   modified: "Modified",
@@ -1269,14 +1440,13 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
     this.busy = false;
     /** Vault paths the user has ticked for a manual re-upload. */
     this.selected = /* @__PURE__ */ new Set();
-    /**
-     * Selection mode is the manual re-upload flow: only here do per-file
-     * checkboxes appear. The default (audit) view stays checkbox-free — Scan diff
-     * just reports the diff and Sync all/Sync these act on it automatically.
-     */
-    this.selectionMode = false;
-    /** The "Re-sync selected" button, kept so its label can update live. */
-    this.resyncBtn = null;
+    /** Folder paths currently expanded in the tree. */
+    this.expanded = /* @__PURE__ */ new Set();
+    /** Whether the "Ignored" section at the bottom is expanded. */
+    this.ignoredExpanded = false;
+    /** Selection-dependent buttons, kept so their labels can update live. */
+    this.syncSelectedBtn = null;
+    this.ignoreSelectedBtn = null;
     this.plugin = plugin;
   }
   getViewType() {
@@ -1310,7 +1480,7 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
       const result = await this.plugin.engine.computeDiff();
       this.changes = result.changes;
       this.selected.clear();
-      this.selectionMode = false;
+      this.expanded = foldersWithChanges(this.changes);
       if (result.missingMappings.length > 0) {
         new import_obsidian5.Notice(
           `Some mapped folders were not found: ${result.missingMappings.map((m) => m.vaultPath).join(", ")}`
@@ -1377,6 +1547,8 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
         }
       );
       let msg = `Synced ${result.ok} item(s).`;
+      if (result.parsed > 0)
+        msg += ` Parsing ${result.parsed}.`;
       if (result.failed > 0)
         msg += ` ${result.failed} failed.`;
       new import_obsidian5.Notice(msg);
@@ -1390,11 +1562,43 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
       await this.scan();
     }
   }
+  /**
+   * Freeze the ticked files: add them to the persistent ignore list so the Diff
+   * skips them — never uploaded, and any already-synced document left in place.
+   * Dropped from the current diff view without a re-scan; they reappear under
+   * "Ignored" where they can be un-ignored.
+   */
+  async ignoreSelected() {
+    if (this.selected.size === 0) {
+      new import_obsidian5.Notice("No files selected. Tick the files you want to ignore.");
+      return;
+    }
+    const picked = this.selected;
+    const merged = new Set(this.plugin.settings.ignoredPaths);
+    for (const path of picked)
+      merged.add(path);
+    this.plugin.settings.ignoredPaths = [...merged].sort(
+      (a, b) => a.localeCompare(b)
+    );
+    await this.plugin.saveSettings();
+    this.changes = this.changes.filter((c) => !picked.has(c.vaultPath));
+    this.selected = /* @__PURE__ */ new Set();
+    this.render();
+    new import_obsidian5.Notice(`Ignoring ${picked.size} file(s).`);
+  }
+  /** Un-freeze one path, then re-scan so it re-enters the diff classified. */
+  async unignore(path) {
+    this.plugin.settings.ignoredPaths = this.plugin.settings.ignoredPaths.filter((p) => p !== path);
+    await this.plugin.saveSettings();
+    this.render();
+    await this.scan();
+  }
   render() {
     const container = this.containerEl.children[1];
     container.empty();
     container.addClass("ragflow-sync-view");
-    this.resyncBtn = null;
+    this.syncSelectedBtn = null;
+    this.ignoreSelectedBtn = null;
     const toolbar = container.createDiv({ cls: "ragflow-sync-toolbar" });
     this.renderToolbar(toolbar);
     this.statusEl = container.createDiv({ cls: "ragflow-sync-status" });
@@ -1403,115 +1607,166 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
         cls: "ragflow-sync-empty",
         text: 'No scan results yet. Click "Scan diff" to compare your vault with RAGFlow.'
       });
-      return;
+    } else {
+      const tree = container.createDiv({ cls: "ragflow-sync-tree" });
+      const root = buildTree(this.changes);
+      this.renderChildren(tree, root, 0);
     }
-    const byKind = /* @__PURE__ */ new Map();
-    for (const kind of KIND_ORDER)
-      byKind.set(kind, []);
-    for (const change of this.changes)
-      byKind.get(change.kind).push(change);
-    for (const kind of KIND_ORDER) {
-      const list = byKind.get(kind);
-      if (list.length > 0)
-        this.renderGroup(container, kind, list);
-    }
+    this.renderIgnored(container);
     this.updateSelectionUi();
   }
-  /**
-   * The toolbar differs by mode. Audit (default): Scan diff, Sync all, and an
-   * entry into selection mode. Selection: confirm the ticked re-sync, or cancel
-   * back to the audit view.
-   */
   renderToolbar(toolbar) {
     const scanBtn = toolbar.createEl("button", { text: "Scan diff" });
     scanBtn.onclick = () => void this.scan();
-    if (this.selectionMode) {
-      this.resyncBtn = toolbar.createEl("button", {
-        text: "Re-sync selected"
-      });
-      this.resyncBtn.onclick = () => void this.syncSelected();
-      const cancelBtn = toolbar.createEl("button", { text: "Cancel" });
-      cancelBtn.onclick = () => {
-        this.selectionMode = false;
-        this.selected.clear();
-        this.render();
-      };
-      return;
-    }
     const syncAllBtn = toolbar.createEl("button", { text: "Sync all" });
     syncAllBtn.addClass("mod-cta");
     syncAllBtn.onclick = () => void this.syncChanges(this.changes);
+    this.syncSelectedBtn = toolbar.createEl("button", { text: "Sync selected" });
+    this.syncSelectedBtn.onclick = () => void this.syncSelected();
+    this.ignoreSelectedBtn = toolbar.createEl("button", {
+      text: "Ignore selected"
+    });
+    this.ignoreSelectedBtn.onclick = () => void this.ignoreSelected();
     if (this.changes.length > 0) {
-      const selectBtn = toolbar.createEl("button", {
-        text: "Re-sync selected\u2026"
-      });
-      selectBtn.onclick = () => {
-        this.selectionMode = true;
-        this.selected.clear();
+      const expandBtn = toolbar.createEl("button", { text: "Expand all" });
+      expandBtn.onclick = () => {
+        this.expanded = allFolderPaths(this.changes);
+        this.render();
+      };
+      const collapseBtn = toolbar.createEl("button", { text: "Collapse all" });
+      collapseBtn.onclick = () => {
+        this.expanded.clear();
         this.render();
       };
     }
   }
-  renderGroup(container, kind, list) {
-    const group = container.createDiv({ cls: "ragflow-sync-group" });
-    const header = group.createDiv({ cls: "ragflow-sync-group-header" });
-    if (this.selectionMode) {
-      const groupToggle = header.createEl("label", {
-        cls: "ragflow-sync-group-toggle"
-      });
-      const groupBox = groupToggle.createEl("input", { type: "checkbox" });
-      groupBox.checked = list.every((c) => this.selected.has(c.vaultPath));
-      groupBox.onchange = () => {
-        for (const c of list) {
-          if (groupBox.checked)
-            this.selected.add(c.vaultPath);
-          else
-            this.selected.delete(c.vaultPath);
-        }
-        this.render();
-      };
-      groupToggle.createSpan({ text: `${KIND_LABEL[kind]} (${list.length})` });
-    } else {
-      header.createSpan({ text: `${KIND_LABEL[kind]} (${list.length})` });
-      if (kind !== "unchanged") {
-        const btn = header.createEl("button", { text: "Sync these" });
-        btn.onclick = () => void this.syncChanges(list);
-      }
-    }
-    for (const change of list) {
-      const item = group.createDiv({ cls: "ragflow-sync-item" });
-      const main = item.createDiv({ cls: "ragflow-sync-item-main" });
-      if (this.selectionMode) {
-        const box = main.createEl("input", { type: "checkbox" });
-        box.checked = this.selected.has(change.vaultPath);
-        box.onchange = () => {
-          if (box.checked)
-            this.selected.add(change.vaultPath);
-          else
-            this.selected.delete(change.vaultPath);
-          this.updateSelectionUi();
-        };
-      }
-      main.createDiv({
-        cls: "ragflow-sync-item-path",
-        text: change.vaultPath
-      });
-      item.createSpan({
-        cls: `ragflow-sync-badge ${kind}`,
-        text: KIND_LABEL[kind]
-      });
+  /** Render the folders-then-files under a node, sorted, at the given depth. */
+  renderChildren(parent, node, depth) {
+    for (const child of sortedChildren(node)) {
+      if (isFileLeaf(child))
+        this.renderFile(parent, child, depth);
+      else
+        this.renderFolder(parent, child, depth);
     }
   }
-  /** Reflect the current tick count on the "Re-sync selected" button. */
-  updateSelectionUi() {
-    if (!this.resyncBtn)
+  renderFolder(parent, node, depth) {
+    const leaves = leavesOf(node);
+    const expanded = this.expanded.has(node.path);
+    const row = parent.createDiv({ cls: "ragflow-tree-row ragflow-tree-folder" });
+    row.style.paddingLeft = `${depth * 16}px`;
+    const twisty = row.createSpan({
+      cls: "ragflow-tree-twisty",
+      text: expanded ? "\u25BE" : "\u25B8"
+    });
+    twisty.onclick = (e) => {
+      e.stopPropagation();
+      this.toggleFolder(node.path);
+    };
+    const box = row.createEl("input", { type: "checkbox" });
+    const picked = leaves.filter((l) => this.selected.has(l.path)).length;
+    box.checked = picked > 0 && picked === leaves.length;
+    box.indeterminate = picked > 0 && picked < leaves.length;
+    box.onclick = (e) => e.stopPropagation();
+    box.onchange = () => {
+      for (const leaf of leaves) {
+        if (box.checked)
+          this.selected.add(leaf.path);
+        else
+          this.selected.delete(leaf.path);
+      }
+      this.render();
+    };
+    const label = row.createDiv({ cls: "ragflow-tree-name" });
+    label.setText(node.name);
+    label.onclick = () => this.toggleFolder(node.path);
+    const summary = changeSummary(leaves);
+    if (summary) {
+      row.createSpan({ cls: "ragflow-tree-count", text: summary });
+    }
+    if (expanded) {
+      const childWrap = parent.createDiv({ cls: "ragflow-tree-children" });
+      this.renderChildren(childWrap, node, depth + 1);
+    }
+  }
+  renderFile(parent, node, depth) {
+    const change = node.change;
+    const row = parent.createDiv({ cls: "ragflow-tree-row ragflow-tree-file" });
+    row.style.paddingLeft = `${depth * 16 + 16}px`;
+    const box = row.createEl("input", { type: "checkbox" });
+    box.checked = this.selected.has(change.vaultPath);
+    box.onchange = () => {
+      if (box.checked)
+        this.selected.add(change.vaultPath);
+      else
+        this.selected.delete(change.vaultPath);
+      this.render();
+    };
+    row.createDiv({ cls: "ragflow-tree-name", text: node.name });
+    row.createSpan({
+      cls: `ragflow-sync-badge ${change.kind}`,
+      text: KIND_LABEL[change.kind]
+    });
+  }
+  /** Collapsible list of ignored (frozen) paths, each with an un-ignore action. */
+  renderIgnored(container) {
+    const paths = this.plugin.settings.ignoredPaths;
+    if (paths.length === 0)
       return;
+    const section = container.createDiv({ cls: "ragflow-sync-ignored" });
+    const header = section.createDiv({ cls: "ragflow-tree-row ragflow-ignored-header" });
+    const twisty = header.createSpan({
+      cls: "ragflow-tree-twisty",
+      text: this.ignoredExpanded ? "\u25BE" : "\u25B8"
+    });
+    twisty.onclick = () => this.toggleIgnored();
+    const label = header.createDiv({ cls: "ragflow-tree-name" });
+    label.setText(`Ignored (${paths.length})`);
+    label.onclick = () => this.toggleIgnored();
+    const unignoreAll = header.createEl("button", { text: "Un-ignore all" });
+    unignoreAll.onclick = async () => {
+      this.plugin.settings.ignoredPaths = [];
+      await this.plugin.saveSettings();
+      this.render();
+      await this.scan();
+    };
+    if (!this.ignoredExpanded)
+      return;
+    const list = section.createDiv({ cls: "ragflow-tree-children" });
+    for (const path of paths) {
+      const row = list.createDiv({ cls: "ragflow-tree-row ragflow-tree-file" });
+      row.style.paddingLeft = "16px";
+      row.createDiv({ cls: "ragflow-tree-name", text: path });
+      const btn = row.createEl("button", { text: "Un-ignore" });
+      btn.onclick = () => void this.unignore(path);
+    }
+  }
+  toggleIgnored() {
+    this.ignoredExpanded = !this.ignoredExpanded;
+    this.render();
+  }
+  toggleFolder(path) {
+    if (this.expanded.has(path))
+      this.expanded.delete(path);
+    else
+      this.expanded.add(path);
+    this.render();
+  }
+  /** Reflect the current tick count on the selection-dependent buttons. */
+  updateSelectionUi() {
     const n = this.selected.size;
-    this.resyncBtn.setText(
-      n > 0 ? `Re-sync selected (${n})` : "Re-sync selected"
-    );
-    this.resyncBtn.toggleClass("mod-warning", n > 0);
-    this.resyncBtn.disabled = n === 0;
+    if (this.syncSelectedBtn) {
+      this.syncSelectedBtn.setText(
+        n > 0 ? `Sync selected (${n})` : "Sync selected"
+      );
+      this.syncSelectedBtn.toggleClass("mod-warning", n > 0);
+      this.syncSelectedBtn.disabled = n === 0;
+    }
+    if (this.ignoreSelectedBtn) {
+      this.ignoreSelectedBtn.setText(
+        n > 0 ? `Ignore selected (${n})` : "Ignore selected"
+      );
+      this.ignoreSelectedBtn.disabled = n === 0;
+    }
   }
 };
 

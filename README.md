@@ -16,8 +16,13 @@ rather than noise in the document body. Your vault note is never modified.
 - Map one or more Obsidian folders to target RAGFlow datasets.
 - Strip each note's frontmatter on upload and set it as document metadata via
   the RAGFlow metadata API; the original note stays unchanged.
-- Scan differences before uploading or deleting anything.
-- Sync all changes, or sync one change group at a time.
+- Scan differences before uploading or deleting anything, shown as an
+  expandable vault-folder tree.
+- Sync all changes, or tick specific files and folders and sync only those.
+- Ignore specific files so they are never uploaded and never deleted — frozen,
+  not removed from scope.
+- Optionally auto-parse uploaded documents in RAGFlow with each dataset's own
+  chunking method, right after the upload finishes.
 - Track local file hashes to avoid re-uploading unchanged content.
 - Optionally internalize Obsidian double links: rewrite `[[wikilinks]]` and
   `![[embeds]]` to plain text/standard Markdown and append a related-notes
@@ -308,14 +313,20 @@ There are three ways to open or run sync actions:
 
 2. Click `Scan diff`.
 
-3. Review the result groups:
+3. Review the result. The diff is shown as your vault's folder tree: each folder
+   can be expanded or collapsed, folders that contain changes are expanded for
+   you, and each folder shows a short summary (e.g. `2 new, 1 modified`). Every
+   file carries a badge:
 
    - `New`: files that exist locally but have not been uploaded yet.
    - `Modified`: files whose content changed since the last successful sync.
    - `Deleted`: files that were synced before but no longer exist locally.
    - `Up to date`: files that match the last synced state.
 
-4. Click `Sync all` to apply all changes, or click `Sync these` on one group.
+   Use `Expand all` / `Collapse all` to change how much of the tree is open.
+
+4. Click `Sync all` to apply every change at once, or tick specific files and
+   folders and click `Sync selected (N)` to act on just those (see below).
 
 5. Wait for the final notice. The panel scans again after syncing so the latest
    state is visible.
@@ -332,18 +343,28 @@ re-upload once with the new processing — no manual action needed.
 
 If you ever need to rebuild RAGFlow's copies without any change to trigger it
 (for example you deleted some documents on the RAGFlow side, or a few were left
-in a failed parsing state), click `Re-sync selected…` in the panel. This switches
-the diff into a selection view where every file — including ones marked
-`Up to date` — gets a checkbox, and each group header has a checkbox that ticks
-the whole group at once. Tick the files you want to rebuild, then click
-`Re-sync selected (N)`. Selected `Up to date` files are re-uploaded as if
-modified; nothing else is touched, so you rebuild only the documents you choose
-instead of re-uploading the entire vault. `Scan diff` (or `Cancel`) returns to
-the plain audit view, which stays checkbox-free — it just reports the diff for
-`Sync all`/`Sync these` to act on automatically.
+in a failed parsing state), use the checkboxes in the tree. Every row — folders
+and files, including ones marked `Up to date` — has a checkbox; ticking a folder
+selects every file beneath it, and a folder whose files are only partly selected
+shows a dash. Tick what you want to rebuild, then click `Sync selected (N)`.
+Selected `Up to date` files are re-uploaded as if modified; nothing else is
+touched, so you rebuild only the documents you choose instead of re-uploading
+the entire vault.
 
 To rebuild *everything* regardless of the diff result, run
 `RAGFlow Sync: Force re-sync all` from the command palette.
+
+### Ignoring Files
+
+To stop specific files from ever syncing without removing them from a mapping,
+tick them in the tree and click `Ignore selected (N)`. Ignored files are
+**frozen**: they are never uploaded, and any document already in RAGFlow for
+them is left in place — the diff simply skips them. This is the key difference
+from *Exclude paths* in settings: excluding a path takes a file out of scope, so
+an already-synced document would be *deleted* on the next sync; ignoring keeps
+the existing document untouched. Ignored files collect under a collapsible
+`Ignored (N)` section at the bottom of the panel, where `Un-ignore` (or
+`Un-ignore all`) returns them to normal diffing on the next scan.
 
 ## How Sync Works
 
@@ -355,8 +376,12 @@ To rebuild *everything* regardless of the diff result, run
 - Unchanged files are skipped — unless the plugin's processing version moved on
   since they were synced, in which case they re-upload once (see above).
 
-Uploaded documents are not parsed/chunked automatically — trigger parsing in the
-RAGFlow UI (or via its API) when you are ready.
+With **Auto-parse after upload** enabled (the default, under *Parsing* in
+settings), every document a sync uploads is queued for parsing in RAGFlow right
+after the upload batch, using each dataset's own configured chunking method —
+no need to start parsing by hand. Turn the toggle off to leave uploaded
+documents unparsed and trigger parsing yourself in the RAGFlow UI (or via its
+API) when you are ready.
 
 The plugin stores sync metadata in Obsidian plugin data. This state is used to
 detect changes quickly and to know which dataset document should be deleted or

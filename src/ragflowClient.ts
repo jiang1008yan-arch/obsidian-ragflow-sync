@@ -16,6 +16,17 @@ export class RagflowClient {
 		this.getSettings = getSettings;
 	}
 
+	/**
+	 * Drop the cached dataset list and name->id map. The client lives for the
+	 * whole plugin session, so this must be called when the connection settings
+	 * (base URL / API key) change — otherwise a later list or a "Test connection"
+	 * would answer from a cache built against the old server.
+	 */
+	invalidate(): void {
+		this.datasetsCache = null;
+		this.datasetIdByName.clear();
+	}
+
 	private base(): string {
 		const url = this.getSettings().ragflowBaseUrl.replace(/\/+$/, "");
 		return `${url}/api/v1`;
@@ -179,6 +190,22 @@ export class RagflowClient {
 			method: "PUT",
 			headers: this.headers({ "Content-Type": "application/json" }),
 			body: JSON.stringify({ meta_fields: meta }),
+		});
+	}
+
+	/**
+	 * Start parsing the given documents in a dataset (RAGFlow "Parse documents":
+	 * POST /datasets/{id}/chunks). RAGFlow uses the dataset's own configured
+	 * chunking method; parsing then runs asynchronously on the server. Returns as
+	 * soon as the job is accepted, not when parsing completes.
+	 */
+	async parseDocuments(datasetId: string, ids: string[]): Promise<void> {
+		if (ids.length === 0) return;
+		await this.send({
+			url: `${this.base()}/datasets/${datasetId}/chunks`,
+			method: "POST",
+			headers: this.headers({ "Content-Type": "application/json" }),
+			body: JSON.stringify({ document_ids: ids }),
 		});
 	}
 

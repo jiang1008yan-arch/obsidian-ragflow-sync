@@ -1,11 +1,11 @@
 import { AbstractInputSuggest, App } from "obsidian";
 
 /**
- * Autocomplete for a folder-path text input. Backs both the Obsidian-folder and
- * the RAGFlow-folder pickers in settings: the candidate list is supplied by a
- * callback (read fresh each keystroke, so async-loaded RAGFlow paths appear once
- * fetched), and it stays a free-text field — typing a not-yet-existing RAGFlow
- * path is still allowed, since sync creates missing target folders.
+ * Autocomplete for a text input. Backs both the vault-folder picker and the
+ * RAGFlow-dataset picker in settings: the candidate list is supplied by a
+ * callback (read fresh each keystroke, so async-loaded dataset names appear once
+ * fetched), and it stays a free-text field — typing a not-yet-existing dataset
+ * name is still allowed, since sync creates a missing target dataset.
  */
 export class FolderInputSuggest extends AbstractInputSuggest<string> {
 	constructor(
