@@ -39,6 +39,13 @@ export interface RagflowSyncSettings {
 	 * mis-splitting columns. The vault files themselves are never modified.
 	 */
 	normalizeTables: boolean;
+	/**
+	 * When true, every document uploaded during a sync is queued for parsing in
+	 * RAGFlow right after the upload batch, using each dataset's own configured
+	 * chunking method. When false, uploaded documents are left unparsed for the
+	 * user to parse in RAGFlow manually.
+	 */
+	autoParse: boolean;
 	/** Persisted local sync state. */
 	state: SyncState;
 }

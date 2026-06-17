@@ -16,6 +16,7 @@ export const DEFAULT_SETTINGS: RagflowSyncSettings = {
 	excludeGlobs: [".trash", ".obsidian"],
 	internalizeLinks: false,
 	normalizeTables: true,
+	autoParse: true,
 	state: { files: {} },
 };
 
@@ -162,6 +163,22 @@ export class RagflowSyncSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.normalizeTables)
 					.onChange(async (value) => {
 						this.plugin.settings.normalizeTables = value;
+						await this.plugin.saveSettings();
+					})
+			);
+
+		containerEl.createEl("h2", { text: "Parsing" });
+
+		new Setting(containerEl)
+			.setName("Auto-parse after upload")
+			.setDesc(
+				"After a sync uploads documents, automatically start parsing them in RAGFlow using each dataset's own configured chunking method. Turn this off to leave uploaded documents unparsed and parse them yourself in RAGFlow."
+			)
+			.addToggle((toggle) =>
+				toggle
+					.setValue(this.plugin.settings.autoParse)
+					.onChange(async (value) => {
+						this.plugin.settings.autoParse = value;
 						await this.plugin.saveSettings();
 					})
 			);

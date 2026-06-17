@@ -182,6 +182,22 @@ export class RagflowClient {
 		});
 	}
 
+	/**
+	 * Start parsing the given documents in a dataset (RAGFlow "Parse documents":
+	 * POST /datasets/{id}/chunks). RAGFlow uses the dataset's own configured
+	 * chunking method; parsing then runs asynchronously on the server. Returns as
+	 * soon as the job is accepted, not when parsing completes.
+	 */
+	async parseDocuments(datasetId: string, ids: string[]): Promise<void> {
+		if (ids.length === 0) return;
+		await this.send({
+			url: `${this.base()}/datasets/${datasetId}/chunks`,
+			method: "POST",
+			headers: this.headers({ "Content-Type": "application/json" }),
+			body: JSON.stringify({ document_ids: ids }),
+		});
+	}
+
 	async deleteDocuments(datasetId: string, ids: string[]): Promise<void> {
 		if (ids.length === 0) return;
 		await this.send({

@@ -53,6 +53,8 @@ export interface ApplyResult {
 	ok: number;
 	failed: number;
 	errors: string[];
+	/** Documents queued for parsing in RAGFlow (0 when auto-parse is off). */
+	parsed: number;
 }
 
 /**
@@ -165,16 +167,22 @@ export class SyncEngine {
 	): Promise<ApplyResult> {
 		const actionable = changes.filter((c) => c.kind !== "unchanged");
 		let done = 0;
-		const result: ApplyResult = { ok: 0, failed: 0, errors: [] };
+		const result: ApplyResult = { ok: 0, failed: 0, errors: [], parsed: 0 };
+
+		// Document ids uploaded this run, grouped by dataset, so a single parse
+		// request per dataset can kick them all off once the uploads finish.
+		const uploaded = new Map<string, string[]>();
 
 		this.companionIndex = await this.buildCompanionIndex();
 		try {
 			for (const change of actionable) {
 				try {
 					if (change.kind === "new") {
-						await this.syncUpload(change, undefined);
+						const up = await this.syncUpload(change, undefined);
+						this.recordUpload(uploaded, up);
 					} else if (change.kind === "modified") {
-						await this.syncUpload(change, change.record);
+						const up = await this.syncUpload(change, change.record);
+						this.recordUpload(uploaded, up);
 					} else if (change.kind === "deleted") {
 						if (change.record) {
 							await this.client.deleteDocuments(change.record.datasetId, [
@@ -194,13 +202,42 @@ export class SyncEngine {
 		} finally {
 			this.companionIndex = null;
 		}
+
+		// Auto-parse: hand the freshly uploaded documents to RAGFlow for parsing
+		// with each dataset's configured chunking method. A parse failure is
+		// reported but does not undo the upload — the documents are in RAGFlow and
+		// can be parsed manually.
+		if (this.getSettings().autoParse) {
+			for (const [datasetId, ids] of uploaded) {
+				onProgress?.(done, actionable.length, `Parsing ${ids.length} document(s)…`);
+				try {
+					await this.client.parseDocuments(datasetId, ids);
+					result.parsed += ids.length;
+				} catch (e) {
+					result.errors.push(
+						`parse (dataset ${datasetId}): ${(e as Error).message}`
+					);
+				}
+			}
+		}
+
 		return result;
+	}
+
+	/** Group an uploaded document id under its dataset for the parse step. */
+	private recordUpload(
+		uploaded: Map<string, string[]>,
+		up: { datasetId: string; documentId: string }
+	): void {
+		const ids = uploaded.get(up.datasetId);
+		if (ids) ids.push(up.documentId);
+		else uploaded.set(up.datasetId, [up.documentId]);
 	}
 
 	private async syncUpload(
 		change: FileChange,
 		oldRecord: SyncedFileRecord | undefined
-	): Promise<void> {
+	): Promise<{ datasetId: string; documentId: string }> {
 		const file = this.app.vault.getAbstractFileByPath(change.vaultPath);
 		if (!(file instanceof TFile)) {
 			throw new Error("File no longer exists in vault.");
@@ -291,6 +328,8 @@ export class SyncEngine {
 					`(document kept; metadata will be retried on the next scan)`
 			);
 		}
+
+		return { datasetId, documentId: doc.id };
 	}
 
 	/**

@@ -5,53 +5,59 @@
 	margin-bottom: 12px;
 }
 
-.ragflow-sync-view .ragflow-sync-group {
-	margin-bottom: 16px;
+.ragflow-sync-view .ragflow-sync-tree {
+	margin-top: 4px;
 }
 
-.ragflow-sync-view .ragflow-sync-group-header {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	font-weight: var(--font-semibold);
-	margin-bottom: 4px;
-	padding-bottom: 2px;
-	border-bottom: 1px solid var(--background-modifier-border);
-}
-
-.ragflow-sync-view .ragflow-sync-group-toggle {
+.ragflow-sync-view .ragflow-tree-row {
 	display: flex;
 	align-items: center;
 	gap: 6px;
-	cursor: pointer;
-}
-
-.ragflow-sync-view .ragflow-sync-item {
-	display: flex;
-	align-items: center;
-	justify-content: space-between;
-	gap: 8px;
 	padding: 2px 0;
 	font-size: var(--font-ui-small);
 }
 
-.ragflow-sync-view .ragflow-sync-item-main {
-	display: flex;
-	align-items: center;
-	gap: 6px;
-	min-width: 0;
-	flex: 1;
+.ragflow-sync-view .ragflow-tree-row:hover {
+	background-color: var(--background-modifier-hover);
 }
 
-.ragflow-sync-view .ragflow-sync-item-main input[type="checkbox"] {
-	flex-shrink: 0;
+.ragflow-sync-view .ragflow-tree-twisty {
+	flex: 0 0 auto;
+	width: 12px;
+	text-align: center;
+	cursor: pointer;
+	color: var(--text-muted);
+	user-select: none;
+}
+
+.ragflow-sync-view .ragflow-tree-file .ragflow-tree-name {
+	/* Files have no twisty; nudge so names align under their folder. */
+	margin-left: 0;
+}
+
+.ragflow-sync-view .ragflow-tree-row input[type="checkbox"] {
+	flex: 0 0 auto;
 	cursor: pointer;
 }
 
-.ragflow-sync-view .ragflow-sync-item-path {
+.ragflow-sync-view .ragflow-tree-name {
+	flex: 1;
+	min-width: 0;
 	overflow: hidden;
 	text-overflow: ellipsis;
 	white-space: nowrap;
+	cursor: default;
+}
+
+.ragflow-sync-view .ragflow-tree-folder .ragflow-tree-name {
+	font-weight: var(--font-semibold);
+	cursor: pointer;
+}
+
+.ragflow-sync-view .ragflow-tree-count {
+	flex: 0 0 auto;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
 }
 
 .ragflow-sync-view .ragflow-sync-badge {

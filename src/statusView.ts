@@ -5,13 +5,24 @@ import { summarize } from "./syncEngine";
 
 export const VIEW_TYPE_RAGFLOW_SYNC = "ragflow-sync-view";
 
-const KIND_ORDER: ChangeKind[] = ["new", "modified", "deleted", "unchanged"];
 const KIND_LABEL: Record<ChangeKind, string> = {
 	new: "New",
 	modified: "Modified",
 	deleted: "Deleted",
 	unchanged: "Up to date",
 };
+
+/** A node in the vault-folder tree the panel renders the diff into. */
+interface TreeNode {
+	/** Last path segment (folder or file name). */
+	name: string;
+	/** Full vault path to this node. */
+	path: string;
+	/** Child folders and files, keyed by their name segment. */
+	children: Map<string, TreeNode>;
+	/** Present only on a file leaf: the diff entry for that file. */
+	change?: FileChange;
+}
 
 export class RagflowSyncView extends ItemView {
 	plugin: RagflowSyncPlugin;
@@ -20,14 +31,10 @@ export class RagflowSyncView extends ItemView {
 	private busy = false;
 	/** Vault paths the user has ticked for a manual re-upload. */
 	private selected: Set<string> = new Set();
-	/**
-	 * Selection mode is the manual re-upload flow: only here do per-file
-	 * checkboxes appear. The default (audit) view stays checkbox-free — Scan diff
-	 * just reports the diff and Sync all/Sync these act on it automatically.
-	 */
-	private selectionMode = false;
-	/** The "Re-sync selected" button, kept so its label can update live. */
-	private resyncBtn: HTMLButtonElement | null = null;
+	/** Folder paths currently expanded in the tree. */
+	private expanded: Set<string> = new Set();
+	/** The "Sync selected" button, kept so its label can update live. */
+	private syncSelectedBtn: HTMLButtonElement | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: RagflowSyncPlugin) {
 		super(leaf);
@@ -69,10 +76,10 @@ export class RagflowSyncView extends ItemView {
 		try {
 			const result = await this.plugin.engine.computeDiff();
 			this.changes = result.changes;
-			// A fresh scan is an audit: drop any prior selection and leave
-			// selection mode so the diff is shown checkbox-free.
+			// A fresh scan is a clean slate: drop any prior selection and expand the
+			// folders that hold actionable changes so they are visible at a glance.
 			this.selected.clear();
-			this.selectionMode = false;
+			this.expanded = this.foldersWithChanges(this.changes);
 			if (result.missingMappings.length > 0) {
 				new Notice(
 					`Some mapped folders were not found: ${result.missingMappings
@@ -148,6 +155,7 @@ export class RagflowSyncView extends ItemView {
 				}
 			);
 			let msg = `Synced ${result.ok} item(s).`;
+			if (result.parsed > 0) msg += ` Parsing ${result.parsed}.`;
 			if (result.failed > 0) msg += ` ${result.failed} failed.`;
 			new Notice(msg);
 			if (result.errors.length > 0) {
@@ -166,7 +174,7 @@ export class RagflowSyncView extends ItemView {
 		container.empty();
 		container.addClass("ragflow-sync-view");
 
-		this.resyncBtn = null;
+		this.syncSelectedBtn = null;
 		const toolbar = container.createDiv({ cls: "ragflow-sync-toolbar" });
 		this.renderToolbar(toolbar);
 
@@ -180,123 +188,221 @@ export class RagflowSyncView extends ItemView {
 			return;
 		}
 
-		const byKind = new Map<ChangeKind, FileChange[]>();
-		for (const kind of KIND_ORDER) byKind.set(kind, []);
-		for (const change of this.changes) byKind.get(change.kind)!.push(change);
-
-		for (const kind of KIND_ORDER) {
-			const list = byKind.get(kind)!;
-			if (list.length > 0) this.renderGroup(container, kind, list);
-		}
+		const tree = container.createDiv({ cls: "ragflow-sync-tree" });
+		const root = this.buildTree(this.changes);
+		this.renderChildren(tree, root, 0);
 
 		this.updateSelectionUi();
 	}
 
-	/**
-	 * The toolbar differs by mode. Audit (default): Scan diff, Sync all, and an
-	 * entry into selection mode. Selection: confirm the ticked re-sync, or cancel
-	 * back to the audit view.
-	 */
 	private renderToolbar(toolbar: HTMLElement): void {
 		const scanBtn = toolbar.createEl("button", { text: "Scan diff" });
 		scanBtn.onclick = () => void this.scan();
-
-		if (this.selectionMode) {
-			this.resyncBtn = toolbar.createEl("button", {
-				text: "Re-sync selected",
-			});
-			this.resyncBtn.onclick = () => void this.syncSelected();
-
-			const cancelBtn = toolbar.createEl("button", { text: "Cancel" });
-			cancelBtn.onclick = () => {
-				this.selectionMode = false;
-				this.selected.clear();
-				this.render();
-			};
-			return;
-		}
 
 		const syncAllBtn = toolbar.createEl("button", { text: "Sync all" });
 		syncAllBtn.addClass("mod-cta");
 		syncAllBtn.onclick = () => void this.syncChanges(this.changes);
 
+		this.syncSelectedBtn = toolbar.createEl("button", { text: "Sync selected" });
+		this.syncSelectedBtn.onclick = () => void this.syncSelected();
+
 		if (this.changes.length > 0) {
-			const selectBtn = toolbar.createEl("button", {
-				text: "Re-sync selected…",
-			});
-			selectBtn.onclick = () => {
-				this.selectionMode = true;
-				this.selected.clear();
+			const expandBtn = toolbar.createEl("button", { text: "Expand all" });
+			expandBtn.onclick = () => {
+				this.expanded = this.allFolderPaths(this.changes);
+				this.render();
+			};
+			const collapseBtn = toolbar.createEl("button", { text: "Collapse all" });
+			collapseBtn.onclick = () => {
+				this.expanded.clear();
 				this.render();
 			};
 		}
 	}
 
-	private renderGroup(
-		container: HTMLElement,
-		kind: ChangeKind,
-		list: FileChange[]
+	/** Render the folders-then-files under a node, sorted, at the given depth. */
+	private renderChildren(
+		parent: HTMLElement,
+		node: TreeNode,
+		depth: number
 	): void {
-		const group = container.createDiv({ cls: "ragflow-sync-group" });
-		const header = group.createDiv({ cls: "ragflow-sync-group-header" });
-
-		if (this.selectionMode) {
-			// Group-level "select all": tick every file in this group at once.
-			const groupToggle = header.createEl("label", {
-				cls: "ragflow-sync-group-toggle",
-			});
-			const groupBox = groupToggle.createEl("input", { type: "checkbox" });
-			groupBox.checked = list.every((c) => this.selected.has(c.vaultPath));
-			groupBox.onchange = () => {
-				for (const c of list) {
-					if (groupBox.checked) this.selected.add(c.vaultPath);
-					else this.selected.delete(c.vaultPath);
-				}
-				this.render();
-			};
-			groupToggle.createSpan({ text: `${KIND_LABEL[kind]} (${list.length})` });
-		} else {
-			header.createSpan({ text: `${KIND_LABEL[kind]} (${list.length})` });
-			// Audit view: actionable groups sync automatically, no ticking needed.
-			if (kind !== "unchanged") {
-				const btn = header.createEl("button", { text: "Sync these" });
-				btn.onclick = () => void this.syncChanges(list);
-			}
-		}
-
-		for (const change of list) {
-			const item = group.createDiv({ cls: "ragflow-sync-item" });
-			const main = item.createDiv({ cls: "ragflow-sync-item-main" });
-
-			if (this.selectionMode) {
-				const box = main.createEl("input", { type: "checkbox" });
-				box.checked = this.selected.has(change.vaultPath);
-				box.onchange = () => {
-					if (box.checked) this.selected.add(change.vaultPath);
-					else this.selected.delete(change.vaultPath);
-					this.updateSelectionUi();
-				};
-			}
-
-			main.createDiv({
-				cls: "ragflow-sync-item-path",
-				text: change.vaultPath,
-			});
-			item.createSpan({
-				cls: `ragflow-sync-badge ${kind}`,
-				text: KIND_LABEL[kind],
-			});
+		const entries = [...node.children.values()].sort((a, b) => {
+			const aFolder = a.children.size > 0;
+			const bFolder = b.children.size > 0;
+			if (aFolder !== bFolder) return aFolder ? -1 : 1;
+			return a.name.localeCompare(b.name);
+		});
+		for (const child of entries) {
+			if (child.children.size > 0) this.renderFolder(parent, child, depth);
+			else this.renderFile(parent, child, depth);
 		}
 	}
 
-	/** Reflect the current tick count on the "Re-sync selected" button. */
+	private renderFolder(
+		parent: HTMLElement,
+		node: TreeNode,
+		depth: number
+	): void {
+		const leaves = this.leavesOf(node);
+		const expanded = this.expanded.has(node.path);
+
+		const row = parent.createDiv({ cls: "ragflow-tree-row ragflow-tree-folder" });
+		row.style.paddingLeft = `${depth * 16}px`;
+
+		const twisty = row.createSpan({
+			cls: "ragflow-tree-twisty",
+			text: expanded ? "▾" : "▸",
+		});
+		twisty.onclick = (e) => {
+			e.stopPropagation();
+			this.toggleFolder(node.path);
+		};
+
+		const box = row.createEl("input", { type: "checkbox" });
+		const picked = leaves.filter((l) => this.selected.has(l.path)).length;
+		box.checked = picked > 0 && picked === leaves.length;
+		box.indeterminate = picked > 0 && picked < leaves.length;
+		box.onclick = (e) => e.stopPropagation();
+		box.onchange = () => {
+			for (const leaf of leaves) {
+				if (box.checked) this.selected.add(leaf.path);
+				else this.selected.delete(leaf.path);
+			}
+			this.render();
+		};
+
+		const label = row.createDiv({ cls: "ragflow-tree-name" });
+		label.setText(node.name);
+		label.onclick = () => this.toggleFolder(node.path);
+
+		const summary = this.summaryText(leaves);
+		if (summary) {
+			row.createSpan({ cls: "ragflow-tree-count", text: summary });
+		}
+
+		if (expanded) {
+			const childWrap = parent.createDiv({ cls: "ragflow-tree-children" });
+			this.renderChildren(childWrap, node, depth + 1);
+		}
+	}
+
+	private renderFile(
+		parent: HTMLElement,
+		node: TreeNode,
+		depth: number
+	): void {
+		const change = node.change!;
+		const row = parent.createDiv({ cls: "ragflow-tree-row ragflow-tree-file" });
+		// Indent past the folder twisty so files line up under the folder name.
+		row.style.paddingLeft = `${depth * 16 + 16}px`;
+
+		const box = row.createEl("input", { type: "checkbox" });
+		box.checked = this.selected.has(change.vaultPath);
+		box.onchange = () => {
+			if (box.checked) this.selected.add(change.vaultPath);
+			else this.selected.delete(change.vaultPath);
+			// A file's tick changes its folders' tri-state, so re-render the tree.
+			this.render();
+		};
+
+		row.createDiv({ cls: "ragflow-tree-name", text: node.name });
+		row.createSpan({
+			cls: `ragflow-sync-badge ${change.kind}`,
+			text: KIND_LABEL[change.kind],
+		});
+	}
+
+	private toggleFolder(path: string): void {
+		if (this.expanded.has(path)) this.expanded.delete(path);
+		else this.expanded.add(path);
+		this.render();
+	}
+
+	/** Reflect the current tick count on the "Sync selected" button. */
 	private updateSelectionUi(): void {
-		if (!this.resyncBtn) return;
+		if (!this.syncSelectedBtn) return;
 		const n = this.selected.size;
-		this.resyncBtn.setText(
-			n > 0 ? `Re-sync selected (${n})` : "Re-sync selected"
+		this.syncSelectedBtn.setText(
+			n > 0 ? `Sync selected (${n})` : "Sync selected"
 		);
-		this.resyncBtn.toggleClass("mod-warning", n > 0);
-		this.resyncBtn.disabled = n === 0;
+		this.syncSelectedBtn.toggleClass("mod-warning", n > 0);
+		this.syncSelectedBtn.disabled = n === 0;
+	}
+
+	/** Build a nested folder tree from a flat list of file changes. */
+	private buildTree(changes: FileChange[]): TreeNode {
+		const root: TreeNode = { name: "", path: "", children: new Map() };
+		for (const change of changes) {
+			const parts = change.vaultPath.split("/");
+			let node = root;
+			let acc = "";
+			parts.forEach((part, i) => {
+				acc = acc ? `${acc}/${part}` : part;
+				let child = node.children.get(part);
+				if (!child) {
+					child = { name: part, path: acc, children: new Map() };
+					node.children.set(part, child);
+				}
+				if (i === parts.length - 1) child.change = change;
+				node = child;
+			});
+		}
+		return root;
+	}
+
+	/** Every file leaf under a node, in no particular order. */
+	private leavesOf(node: TreeNode): TreeNode[] {
+		if (node.change && node.children.size === 0) return [node];
+		const out: TreeNode[] = [];
+		for (const child of node.children.values()) {
+			out.push(...this.leavesOf(child));
+		}
+		return out;
+	}
+
+	/** A compact "2 new, 1 modified" summary of a folder's actionable leaves. */
+	private summaryText(leaves: TreeNode[]): string {
+		const counts: Record<ChangeKind, number> = {
+			new: 0,
+			modified: 0,
+			deleted: 0,
+			unchanged: 0,
+		};
+		for (const leaf of leaves) {
+			if (leaf.change) counts[leaf.change.kind] += 1;
+		}
+		const parts: string[] = [];
+		if (counts.new) parts.push(`${counts.new} new`);
+		if (counts.modified) parts.push(`${counts.modified} modified`);
+		if (counts.deleted) parts.push(`${counts.deleted} deleted`);
+		return parts.join(", ");
+	}
+
+	/** Ancestor folders of every actionable change — the default-expanded set. */
+	private foldersWithChanges(changes: FileChange[]): Set<string> {
+		const set = new Set<string>();
+		for (const change of changes) {
+			if (change.kind === "unchanged") continue;
+			this.addAncestorFolders(change.vaultPath, set);
+		}
+		return set;
+	}
+
+	/** Every folder path in the tree, for "Expand all". */
+	private allFolderPaths(changes: FileChange[]): Set<string> {
+		const set = new Set<string>();
+		for (const change of changes) {
+			this.addAncestorFolders(change.vaultPath, set);
+		}
+		return set;
+	}
+
+	private addAncestorFolders(vaultPath: string, set: Set<string>): void {
+		const parts = vaultPath.split("/");
+		let acc = "";
+		for (let i = 0; i < parts.length - 1; i++) {
+			acc = acc ? `${acc}/${parts[i]}` : parts[i];
+			set.add(acc);
+		}
 	}
 }
