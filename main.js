@@ -65,6 +65,7 @@ var DEFAULT_SETTINGS = {
   datasetMappings: [],
   extensions: ["md", "pdf", "docx"],
   excludeGlobs: [".trash", ".obsidian"],
+  ignoredPaths: [],
   internalizeLinks: false,
   normalizeTables: true,
   autoParse: true,
@@ -566,6 +567,8 @@ function classifyByStat(snapshot, state, scope) {
   };
   const inScopePaths = /* @__PURE__ */ new Set();
   for (const entry of snapshot) {
+    if (scope.ignored?.has(entry.path))
+      continue;
     const mapping = isInScope(entry.path, scope);
     if (!mapping)
       continue;
@@ -585,6 +588,8 @@ function classifyByStat(snapshot, state, scope) {
   }
   for (const [vaultPath, record] of Object.entries(state.files)) {
     if (inScopePaths.has(vaultPath))
+      continue;
+    if (scope.ignored?.has(vaultPath))
       continue;
     result.deletions.push({
       vaultPath,
@@ -981,6 +986,7 @@ var SyncEngine = class {
       mappings: s.datasetMappings,
       extensions: s.extensions,
       excludeGlobs: s.excludeGlobs,
+      ignored: new Set(s.ignoredPaths),
       processingVersion: PROCESSING_VERSION
     };
   }
@@ -1321,8 +1327,11 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
     this.selected = /* @__PURE__ */ new Set();
     /** Folder paths currently expanded in the tree. */
     this.expanded = /* @__PURE__ */ new Set();
-    /** The "Sync selected" button, kept so its label can update live. */
+    /** Whether the "Ignored" section at the bottom is expanded. */
+    this.ignoredExpanded = false;
+    /** Selection-dependent buttons, kept so their labels can update live. */
     this.syncSelectedBtn = null;
+    this.ignoreSelectedBtn = null;
     this.plugin = plugin;
   }
   getViewType() {
@@ -1438,11 +1447,43 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
       await this.scan();
     }
   }
+  /**
+   * Freeze the ticked files: add them to the persistent ignore list so the Diff
+   * skips them — never uploaded, and any already-synced document left in place.
+   * Dropped from the current diff view without a re-scan; they reappear under
+   * "Ignored" where they can be un-ignored.
+   */
+  async ignoreSelected() {
+    if (this.selected.size === 0) {
+      new import_obsidian5.Notice("No files selected. Tick the files you want to ignore.");
+      return;
+    }
+    const picked = this.selected;
+    const merged = new Set(this.plugin.settings.ignoredPaths);
+    for (const path of picked)
+      merged.add(path);
+    this.plugin.settings.ignoredPaths = [...merged].sort(
+      (a, b) => a.localeCompare(b)
+    );
+    await this.plugin.saveSettings();
+    this.changes = this.changes.filter((c) => !picked.has(c.vaultPath));
+    this.selected = /* @__PURE__ */ new Set();
+    this.render();
+    new import_obsidian5.Notice(`Ignoring ${picked.size} file(s).`);
+  }
+  /** Un-freeze one path, then re-scan so it re-enters the diff classified. */
+  async unignore(path) {
+    this.plugin.settings.ignoredPaths = this.plugin.settings.ignoredPaths.filter((p) => p !== path);
+    await this.plugin.saveSettings();
+    this.render();
+    await this.scan();
+  }
   render() {
     const container = this.containerEl.children[1];
     container.empty();
     container.addClass("ragflow-sync-view");
     this.syncSelectedBtn = null;
+    this.ignoreSelectedBtn = null;
     const toolbar = container.createDiv({ cls: "ragflow-sync-toolbar" });
     this.renderToolbar(toolbar);
     this.statusEl = container.createDiv({ cls: "ragflow-sync-status" });
@@ -1451,11 +1492,12 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
         cls: "ragflow-sync-empty",
         text: 'No scan results yet. Click "Scan diff" to compare your vault with RAGFlow.'
       });
-      return;
+    } else {
+      const tree = container.createDiv({ cls: "ragflow-sync-tree" });
+      const root = this.buildTree(this.changes);
+      this.renderChildren(tree, root, 0);
     }
-    const tree = container.createDiv({ cls: "ragflow-sync-tree" });
-    const root = this.buildTree(this.changes);
-    this.renderChildren(tree, root, 0);
+    this.renderIgnored(container);
     this.updateSelectionUi();
   }
   renderToolbar(toolbar) {
@@ -1466,6 +1508,10 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
     syncAllBtn.onclick = () => void this.syncChanges(this.changes);
     this.syncSelectedBtn = toolbar.createEl("button", { text: "Sync selected" });
     this.syncSelectedBtn.onclick = () => void this.syncSelected();
+    this.ignoreSelectedBtn = toolbar.createEl("button", {
+      text: "Ignore selected"
+    });
+    this.ignoreSelectedBtn.onclick = () => void this.ignoreSelected();
     if (this.changes.length > 0) {
       const expandBtn = toolbar.createEl("button", { text: "Expand all" });
       expandBtn.onclick = () => {
@@ -1553,6 +1599,43 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
       text: KIND_LABEL[change.kind]
     });
   }
+  /** Collapsible list of ignored (frozen) paths, each with an un-ignore action. */
+  renderIgnored(container) {
+    const paths = this.plugin.settings.ignoredPaths;
+    if (paths.length === 0)
+      return;
+    const section = container.createDiv({ cls: "ragflow-sync-ignored" });
+    const header = section.createDiv({ cls: "ragflow-tree-row ragflow-ignored-header" });
+    const twisty = header.createSpan({
+      cls: "ragflow-tree-twisty",
+      text: this.ignoredExpanded ? "\u25BE" : "\u25B8"
+    });
+    twisty.onclick = () => this.toggleIgnored();
+    const label = header.createDiv({ cls: "ragflow-tree-name" });
+    label.setText(`Ignored (${paths.length})`);
+    label.onclick = () => this.toggleIgnored();
+    const unignoreAll = header.createEl("button", { text: "Un-ignore all" });
+    unignoreAll.onclick = async () => {
+      this.plugin.settings.ignoredPaths = [];
+      await this.plugin.saveSettings();
+      this.render();
+      await this.scan();
+    };
+    if (!this.ignoredExpanded)
+      return;
+    const list = section.createDiv({ cls: "ragflow-tree-children" });
+    for (const path of paths) {
+      const row = list.createDiv({ cls: "ragflow-tree-row ragflow-tree-file" });
+      row.style.paddingLeft = "16px";
+      row.createDiv({ cls: "ragflow-tree-name", text: path });
+      const btn = row.createEl("button", { text: "Un-ignore" });
+      btn.onclick = () => void this.unignore(path);
+    }
+  }
+  toggleIgnored() {
+    this.ignoredExpanded = !this.ignoredExpanded;
+    this.render();
+  }
   toggleFolder(path) {
     if (this.expanded.has(path))
       this.expanded.delete(path);
@@ -1560,16 +1643,22 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
       this.expanded.add(path);
     this.render();
   }
-  /** Reflect the current tick count on the "Sync selected" button. */
+  /** Reflect the current tick count on the selection-dependent buttons. */
   updateSelectionUi() {
-    if (!this.syncSelectedBtn)
-      return;
     const n = this.selected.size;
-    this.syncSelectedBtn.setText(
-      n > 0 ? `Sync selected (${n})` : "Sync selected"
-    );
-    this.syncSelectedBtn.toggleClass("mod-warning", n > 0);
-    this.syncSelectedBtn.disabled = n === 0;
+    if (this.syncSelectedBtn) {
+      this.syncSelectedBtn.setText(
+        n > 0 ? `Sync selected (${n})` : "Sync selected"
+      );
+      this.syncSelectedBtn.toggleClass("mod-warning", n > 0);
+      this.syncSelectedBtn.disabled = n === 0;
+    }
+    if (this.ignoreSelectedBtn) {
+      this.ignoreSelectedBtn.setText(
+        n > 0 ? `Ignore selected (${n})` : "Ignore selected"
+      );
+      this.ignoreSelectedBtn.disabled = n === 0;
+    }
   }
   /** Build a nested folder tree from a flat list of file changes. */
   buildTree(changes) {

@@ -14,6 +14,7 @@ export const DEFAULT_SETTINGS: RagflowSyncSettings = {
 	datasetMappings: [],
 	extensions: ["md", "pdf", "docx"],
 	excludeGlobs: [".trash", ".obsidian"],
+	ignoredPaths: [],
 	internalizeLinks: false,
 	normalizeTables: true,
 	autoParse: true,

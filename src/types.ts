@@ -27,6 +27,14 @@ export interface RagflowSyncSettings {
 	/** Glob-ish path fragments to exclude (substring match on vault path). */
 	excludeGlobs: string[];
 	/**
+	 * Exact vault paths the user has chosen to ignore from the panel. An ignored
+	 * file is frozen: it is never uploaded and, if already synced, its RAGFlow
+	 * document is never deleted — the Diff skips it entirely. Distinct from
+	 * excludeGlobs (which removes a file from scope and so would delete an
+	 * already-synced document); ignoring keeps the existing document untouched.
+	 */
+	ignoredPaths: string[];
+	/**
 	 * When true, Markdown uploads have their [[wikilinks]]/![[embeds]] rewritten
 	 * to plain text/standard Markdown and a "Related notes" section appended. The
 	 * vault files themselves are never modified.
@@ -114,6 +122,11 @@ export interface ScopeConfig {
 	/** Lowercase extensions without dots. */
 	extensions: string[];
 	excludeGlobs: string[];
+	/**
+	 * Exact vault paths to freeze: never uploaded and never deleted, skipped by
+	 * the Diff. Omitted in tests that don't exercise ignoring.
+	 */
+	ignored?: Set<string>;
 	/**
 	 * Current upload-transform version. A synced record whose processingVersion
 	 * differs is re-uploaded regardless of content. Omitted in pure-diff tests

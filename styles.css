@@ -60,6 +60,24 @@
 	font-size: var(--font-ui-smaller);
 }
 
+.ragflow-sync-view .ragflow-sync-ignored {
+	margin-top: 16px;
+	border-top: 1px solid var(--background-modifier-border);
+	padding-top: 8px;
+}
+
+.ragflow-sync-view .ragflow-ignored-header .ragflow-tree-name {
+	font-weight: var(--font-semibold);
+	color: var(--text-muted);
+	cursor: pointer;
+}
+
+.ragflow-sync-view .ragflow-tree-row button {
+	flex: 0 0 auto;
+	padding: 0 8px;
+	font-size: var(--font-ui-smaller);
+}
+
 .ragflow-sync-view .ragflow-sync-badge {
 	flex-shrink: 0;
 	border-radius: 4px;

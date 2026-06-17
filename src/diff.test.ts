@@ -193,6 +193,48 @@ describe("classifyByStat", () => {
 			expect(r.deletions[0].mapping).toBeUndefined();
 		});
 	});
+
+	describe("ignore rule (freeze)", () => {
+		it("does not classify an ignored in-scope file as new", () => {
+			const r = classifyByStat(
+				[entry("Notes/a.md")],
+				state({}),
+				scope({ ignored: new Set(["Notes/a.md"]) })
+			);
+			expect(r.news).toHaveLength(0);
+			expect(r.needHash).toHaveLength(0);
+		});
+
+		it("does not re-flag an ignored modified file", () => {
+			const r = classifyByStat(
+				[entry("Notes/a.md", 20, 200)],
+				state({ "Notes/a.md": record({ size: 10, mtime: 100 }) }),
+				scope({ ignored: new Set(["Notes/a.md"]) })
+			);
+			expect(r.needHash).toHaveLength(0);
+			expect(r.unchanged).toHaveLength(0);
+			expect(r.deletions).toHaveLength(0);
+		});
+
+		it("keeps (does not delete) an already-synced file once ignored", () => {
+			const r = classifyByStat(
+				[entry("Notes/a.md", 10, 100)],
+				state({ "Notes/a.md": record({ size: 10, mtime: 100 }) }),
+				scope({ ignored: new Set(["Notes/a.md"]) })
+			);
+			expect(r.deletions).toHaveLength(0);
+			expect(r.unchanged).toHaveLength(0);
+		});
+
+		it("does not delete an ignored synced file that is gone from the snapshot", () => {
+			const r = classifyByStat(
+				[],
+				state({ "Notes/a.md": record() }),
+				scope({ ignored: new Set(["Notes/a.md"]) })
+			);
+			expect(r.deletions).toHaveLength(0);
+		});
+	});
 });
 
 describe("finalizeWithHashes", () => {

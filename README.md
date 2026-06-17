@@ -19,6 +19,8 @@ rather than noise in the document body. Your vault note is never modified.
 - Scan differences before uploading or deleting anything, shown as an
   expandable vault-folder tree.
 - Sync all changes, or tick specific files and folders and sync only those.
+- Ignore specific files so they are never uploaded and never deleted — frozen,
+  not removed from scope.
 - Optionally auto-parse uploaded documents in RAGFlow with each dataset's own
   chunking method, right after the upload finishes.
 - Track local file hashes to avoid re-uploading unchanged content.
@@ -351,6 +353,18 @@ the entire vault.
 
 To rebuild *everything* regardless of the diff result, run
 `RAGFlow Sync: Force re-sync all` from the command palette.
+
+### Ignoring Files
+
+To stop specific files from ever syncing without removing them from a mapping,
+tick them in the tree and click `Ignore selected (N)`. Ignored files are
+**frozen**: they are never uploaded, and any document already in RAGFlow for
+them is left in place — the diff simply skips them. This is the key difference
+from *Exclude paths* in settings: excluding a path takes a file out of scope, so
+an already-synced document would be *deleted* on the next sync; ignoring keeps
+the existing document untouched. Ignored files collect under a collapsible
+`Ignored (N)` section at the bottom of the panel, where `Un-ignore` (or
+`Un-ignore all`) returns them to normal diffing on the next scan.
 
 ## How Sync Works
 

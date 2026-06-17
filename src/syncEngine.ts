@@ -95,6 +95,7 @@ export class SyncEngine {
 			mappings: s.datasetMappings,
 			extensions: s.extensions,
 			excludeGlobs: s.excludeGlobs,
+			ignored: new Set(s.ignoredPaths),
 			processingVersion: PROCESSING_VERSION,
 		};
 	}

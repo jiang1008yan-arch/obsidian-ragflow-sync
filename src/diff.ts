@@ -35,6 +35,10 @@ export function classifyByStat(
 	const inScopePaths = new Set<string>();
 
 	for (const entry of snapshot) {
+		// Ignored: frozen. Skip classification so it is never uploaded, and leave
+		// it out of inScopePaths — the deletion loop below also skips ignored
+		// paths, so an already-synced ignored file keeps its RAGFlow document.
+		if (scope.ignored?.has(entry.path)) continue;
 		const mapping = isInScope(entry.path, scope);
 		if (!mapping) continue;
 		inScopePaths.add(entry.path);
@@ -61,6 +65,8 @@ export function classifyByStat(
 	// deletion — covering gone, filtered-out, and removed-mapping files.
 	for (const [vaultPath, record] of Object.entries(state.files)) {
 		if (inScopePaths.has(vaultPath)) continue;
+		// Frozen: an ignored synced file is kept, not deleted.
+		if (scope.ignored?.has(vaultPath)) continue;
 		result.deletions.push({
 			vaultPath,
 			record,
