@@ -60,16 +60,16 @@
 	font-size: var(--font-ui-smaller);
 }
 
-.ragflow-sync-view .ragflow-sync-ignored {
-	margin-top: 16px;
-	border-top: 1px solid var(--background-modifier-border);
-	padding-top: 8px;
+.ragflow-sync-view .ragflow-sync-tabs {
+	display: flex;
+	gap: 4px;
+	margin-bottom: 8px;
+	border-bottom: 1px solid var(--background-modifier-border);
+	padding-bottom: 8px;
 }
 
-.ragflow-sync-view .ragflow-ignored-header .ragflow-tree-name {
-	font-weight: var(--font-semibold);
-	color: var(--text-muted);
-	cursor: pointer;
+.ragflow-sync-view .ragflow-sync-tabs button {
+	flex: 1;
 }
 
 .ragflow-sync-view .ragflow-tree-row button {
@@ -102,6 +102,11 @@
 .ragflow-sync-view .ragflow-sync-badge.unchanged {
 	background-color: var(--background-modifier-border);
 	color: var(--text-muted);
+}
+
+.ragflow-sync-view .ragflow-sync-badge.ignored {
+	background-color: var(--background-modifier-border);
+	color: var(--text-faint);
 }
 
 .ragflow-sync-view .ragflow-sync-empty {

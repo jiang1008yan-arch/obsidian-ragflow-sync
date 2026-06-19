@@ -27,13 +27,13 @@ export interface RagflowSyncSettings {
 	/** Glob-ish path fragments to exclude (substring match on vault path). */
 	excludeGlobs: string[];
 	/**
-	 * Exact vault paths the user has chosen to ignore from the panel. An ignored
-	 * file is frozen: it is never uploaded and, if already synced, its RAGFlow
-	 * document is never deleted — the Diff skips it entirely. Distinct from
-	 * excludeGlobs (which removes a file from scope and so would delete an
-	 * already-synced document); ignoring keeps the existing document untouched.
+	 * Vault paths the user has snoozed from the Scan diff list, each with a
+	 * snapshot of the file taken when it was ignored. An ignored entry is still
+	 * shown (with an "Ignored" badge) but excluded from "Sync all"; it re-surfaces
+	 * as a normal change once the file drifts from its snapshot. See IgnoreSnapshot.
+	 * Distinct from excludeGlobs (which removes a file from scope entirely).
 	 */
-	ignoredPaths: string[];
+	ignoredEntries: Record<string, IgnoreSnapshot>;
 	/**
 	 * When true, Markdown uploads have their [[wikilinks]]/![[embeds]] rewritten
 	 * to plain text/standard Markdown and a "Related notes" section appended. The
@@ -57,6 +57,25 @@ export interface RagflowSyncSettings {
 	/** Persisted local sync state. */
 	state: SyncState;
 }
+
+/**
+ * What an ignored ("snoozed") path looked like when the user ignored it. The
+ * next Scan diff compares the file against this to decide whether it is still
+ * the same — and so stays ignored — or has drifted and should re-surface as a
+ * change.
+ *
+ * - `{ hash, size, mtime }` — the file was present when ignored; it stays
+ *   ignored while its content hash still matches (size/mtime are the fast path).
+ * - `{ deleted: true }` — the file was already gone when ignored; it stays
+ *   ignored (shown as "Ignored", never deleted from RAGFlow) until a file
+ *   reappears at the path.
+ * - `{ pending: true }` — migrated from the legacy `ignoredPaths` list, which
+ *   carried no snapshot; the engine fills in the real snapshot on the next scan.
+ */
+export type IgnoreSnapshot =
+	| { hash: string; size: number; mtime: number }
+	| { deleted: true }
+	| { pending: true };
 
 export interface SyncedFileRecord {
 	/** RAGFlow document id within the owning dataset. */
@@ -97,6 +116,11 @@ export interface FileChange {
 	mapping?: DatasetMapping;
 	/** Existing record (present for modified/deleted/unchanged). */
 	record?: SyncedFileRecord;
+	/**
+	 * Set when this path is snoozed: still shown in Scan diff with an "Ignored"
+	 * badge, but excluded from "Sync all". The underlying `kind` is preserved.
+	 */
+	ignored?: boolean;
 	/** Freshly computed content hash (present for modified/unchanged-by-hash). */
 	hash?: string;
 	size?: number;
@@ -122,11 +146,6 @@ export interface ScopeConfig {
 	/** Lowercase extensions without dots. */
 	extensions: string[];
 	excludeGlobs: string[];
-	/**
-	 * Exact vault paths to freeze: never uploaded and never deleted, skipped by
-	 * the Diff. Omitted in tests that don't exercise ignoring.
-	 */
-	ignored?: Set<string>;
 	/**
 	 * Current upload-transform version. A synced record whose processingVersion
 	 * differs is re-uploaded regardless of content. Omitted in pure-diff tests
@@ -165,6 +184,22 @@ export interface HashClassification {
 	modified: FileChange[];
 	unchanged: FileChange[];
 	touches: TouchRefresh[];
+}
+
+/**
+ * Result of applying the ignore snapshots to a freshly assembled change list.
+ * The changes array is the same list with `ignored` flags set; the engine then
+ * persists `staleIgnores` (drop them) and `captured` (write/refresh snapshots).
+ */
+export interface SnoozeResult {
+	changes: FileChange[];
+	/** Ignore entries to drop: the file changed or reappeared, so it re-surfaces. */
+	staleIgnores: string[];
+	/**
+	 * Snapshots to write: a `pending` entry resolved to a real snapshot, or a
+	 * still-ignored file whose stats drifted but content matched (stat refresh).
+	 */
+	captured: Record<string, IgnoreSnapshot>;
 }
 
 /** Outgoing wikilink targets and incoming backlinks for a note, as titles. */
