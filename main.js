@@ -1705,6 +1705,9 @@ function tabData(tab, changes) {
 function syncAllChanges(changes) {
   return changes.filter((c) => !c.ignored && c.kind !== "unchanged");
 }
+function syncSelectedChanges(changes, selected) {
+  return syncAllChanges(changes).filter((c) => selected.has(c.vaultPath));
+}
 function forceSelectedChanges(changes, selected) {
   return changes.filter((c) => selected.has(c.vaultPath)).map(forceUploadChange);
 }
@@ -1799,20 +1802,14 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
   async syncAll() {
     await this.syncChanges(syncAllChanges(this.changes));
   }
-  /**
-   * Re-upload exactly the files the user ticked in the Sync tab, regardless of
-   * diff result. An "unchanged" pick is promoted to "modified" (hash cleared) so
-   * the upload step rebuilds RAGFlow's copy from the current source. Use to
-   * rebuild specific documents — e.g. ones removed or left in a failed state on
-   * the RAGFlow side — without re-uploading the rest.
-   */
+  /** Apply exactly the files the user ticked in the active tab. */
   async syncSelected() {
-    const forced = forceSelectedChanges(this.changes, this.selected);
-    if (forced.length === 0) {
+    const selectedChanges = this.activeTab === "diff" ? syncSelectedChanges(this.changes, this.selected) : forceSelectedChanges(this.changes, this.selected);
+    if (selectedChanges.length === 0) {
       new import_obsidian6.Notice("Tick files or folders to sync.");
       return;
     }
-    await this.syncChanges(forced);
+    await this.syncChanges(selectedChanges);
   }
   /**
    * Re-upload every in-scope file regardless of diff result, by promoting
@@ -1931,8 +1928,12 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
     if (this.activeTab === "diff") {
       const scanBtn = toolbar.createEl("button", { text: "Scan diff" });
       scanBtn.onclick = () => void this.scan();
+      this.syncSelectedBtn = toolbar.createEl("button", {
+        text: "Sync selected"
+      });
+      this.syncSelectedBtn.addClass("mod-cta");
+      this.syncSelectedBtn.onclick = () => void this.syncSelected();
       const syncAllBtn = toolbar.createEl("button", { text: "Sync all" });
-      syncAllBtn.addClass("mod-cta");
       syncAllBtn.onclick = () => void this.syncAll();
       this.ignoreSelectedBtn = toolbar.createEl("button", {
         text: "Ignore selected"

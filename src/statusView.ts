@@ -6,6 +6,7 @@ import {
 	forceAllChanges,
 	forceSelectedChanges,
 	syncAllChanges,
+	syncSelectedChanges,
 	tabData,
 	type PanelTab,
 } from "./panelState";
@@ -113,20 +114,17 @@ export class RagflowSyncView extends ItemView {
 		await this.syncChanges(syncAllChanges(this.changes));
 	}
 
-	/**
-	 * Re-upload exactly the files the user ticked in the Sync tab, regardless of
-	 * diff result. An "unchanged" pick is promoted to "modified" (hash cleared) so
-	 * the upload step rebuilds RAGFlow's copy from the current source. Use to
-	 * rebuild specific documents — e.g. ones removed or left in a failed state on
-	 * the RAGFlow side — without re-uploading the rest.
-	 */
+	/** Apply exactly the files the user ticked in the active tab. */
 	async syncSelected(): Promise<void> {
-		const forced = forceSelectedChanges(this.changes, this.selected);
-		if (forced.length === 0) {
+		const selectedChanges =
+			this.activeTab === "diff"
+				? syncSelectedChanges(this.changes, this.selected)
+				: forceSelectedChanges(this.changes, this.selected);
+		if (selectedChanges.length === 0) {
 			new Notice("Tick files or folders to sync.");
 			return;
 		}
-		await this.syncChanges(forced);
+		await this.syncChanges(selectedChanges);
 	}
 
 	/**
@@ -260,8 +258,13 @@ export class RagflowSyncView extends ItemView {
 			const scanBtn = toolbar.createEl("button", { text: "Scan diff" });
 			scanBtn.onclick = () => void this.scan();
 
+			this.syncSelectedBtn = toolbar.createEl("button", {
+				text: "Sync selected",
+			});
+			this.syncSelectedBtn.addClass("mod-cta");
+			this.syncSelectedBtn.onclick = () => void this.syncSelected();
+
 			const syncAllBtn = toolbar.createEl("button", { text: "Sync all" });
-			syncAllBtn.addClass("mod-cta");
 			syncAllBtn.onclick = () => void this.syncAll();
 
 			this.ignoreSelectedBtn = toolbar.createEl("button", {
