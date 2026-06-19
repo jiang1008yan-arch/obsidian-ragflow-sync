@@ -355,6 +355,27 @@ export class SyncEngine {
 			}
 		}
 
+		// Name-based replace: RAGFlow auto-suffixes a same-named upload (notes.md
+		// -> notes(1).md) instead of replacing it. The id-based delete above misses
+		// any copy we don't have a record for — a file synced before local state
+		// was lost, or earlier accumulated "(n)" duplicates. Clear every colliding
+		// name in the target dataset first so this upload lands clean. Best-effort:
+		// a lookup/delete failure must not block the upload.
+		try {
+			const dupes = await this.client.findDuplicateDocumentIds(
+				datasetId,
+				file.name
+			);
+			if (dupes.length > 0) {
+				await this.client.deleteDocuments(datasetId, dupes);
+			}
+		} catch (e) {
+			console.warn(
+				`RAGFlow Sync: could not clear duplicates of ${file.name} before ` +
+					`upload: ${(e as Error).message}`
+			);
+		}
+
 		// Change detection always hashes the raw source above; the Markdown
 		// transform (frontmatter strip + optional link internalization) only
 		// rewrites the bytes we hand to RAGFlow — the vault file is untouched.

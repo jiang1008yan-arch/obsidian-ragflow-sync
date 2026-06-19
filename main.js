@@ -317,6 +317,13 @@ Content-Type: ${contentType}\r
 
 // src/ragflowClient.ts
 var PAGE_SIZE = 100;
+function isDuplicateName(candidate, baseName) {
+  const dot = baseName.lastIndexOf(".");
+  const stem = dot > 0 ? baseName.slice(0, dot) : baseName;
+  const ext = dot > 0 ? baseName.slice(dot) : "";
+  const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`^${esc(stem)}(\\(\\d+\\))?${esc(ext)}$`).test(candidate);
+}
 var RagflowClient = class {
   constructor(getSettings) {
     /** All datasets, listed once per client lifetime. */
@@ -446,6 +453,39 @@ var RagflowClient = class {
       this.datasetIdByName.set(trimmed, found.id);
       return found.id;
     }
+  }
+  /**
+   * Ids of documents in a dataset whose name collides with `name` — the name
+   * itself plus any RAGFlow "(n)" duplicate of it (see isDuplicateName). Used to
+   * clear existing copies before a re-upload so the new file replaces them
+   * instead of being auto-suffixed. Narrowed server-side by keyword on the stem,
+   * then matched exactly client-side; paginates fully.
+   */
+  async findDuplicateDocumentIds(datasetId, name) {
+    const dot = name.lastIndexOf(".");
+    const stem = dot > 0 ? name.slice(0, dot) : name;
+    const ids = [];
+    let page = 1;
+    while (true) {
+      const data = await this.send({
+        url: `${this.base()}/datasets/${datasetId}/documents${this.query({
+          keywords: stem,
+          page,
+          page_size: PAGE_SIZE
+        })}`,
+        method: "GET",
+        headers: this.headers()
+      });
+      const docs = data?.docs ?? [];
+      for (const d of docs) {
+        if (d.id && isDuplicateName(d.name, name))
+          ids.push(d.id);
+      }
+      if (docs.length < PAGE_SIZE)
+        break;
+      page += 1;
+    }
+    return ids;
   }
   /**
    * Upload one document into a dataset. RAGFlow returns the created document(s);
@@ -1234,6 +1274,19 @@ var SyncEngine = class {
         ]);
       } catch (_e) {
       }
+    }
+    try {
+      const dupes = await this.client.findDuplicateDocumentIds(
+        datasetId,
+        file.name
+      );
+      if (dupes.length > 0) {
+        await this.client.deleteDocuments(datasetId, dupes);
+      }
+    } catch (e) {
+      console.warn(
+        `RAGFlow Sync: could not clear duplicates of ${file.name} before upload: ${e.message}`
+      );
     }
     const prepared = file.extension.toLowerCase() === "md" ? this.prepareMarkdown(bytes, file.path) : { uploadBytes: bytes, meta: {} };
     const uploadBytes = prepared.uploadBytes;

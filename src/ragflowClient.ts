@@ -5,6 +5,24 @@ import { RagflowDataset, RagflowDocument, RagflowSyncSettings } from "./types";
 // RAGFlow's list endpoints cap page_size; 100 is safe across datasets/documents.
 const PAGE_SIZE = 100;
 
+/**
+ * Whether `candidate` is `baseName` or a RAGFlow duplicate-suffixed variant of
+ * it: `stem.ext`, `stem(1).ext`, `stem(2).ext`, … RAGFlow appends a "(n)" suffix
+ * to a same-named upload instead of replacing it, so this finds the existing
+ * copies to remove before a re-upload.
+ *
+ * The "(n)" group is purely numeric, so uploading `report.md` deliberately also
+ * matches `report(2024).md` — an accepted trade-off for cleaning up the suffix
+ * duplicates without a per-file allowlist.
+ */
+export function isDuplicateName(candidate: string, baseName: string): boolean {
+	const dot = baseName.lastIndexOf(".");
+	const stem = dot > 0 ? baseName.slice(0, dot) : baseName;
+	const ext = dot > 0 ? baseName.slice(dot) : "";
+	const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+	return new RegExp(`^${esc(stem)}(\\(\\d+\\))?${esc(ext)}$`).test(candidate);
+}
+
 export class RagflowClient {
 	private getSettings: () => RagflowSyncSettings;
 	/** All datasets, listed once per client lifetime. */
@@ -148,6 +166,42 @@ export class RagflowClient {
 			this.datasetIdByName.set(trimmed, found.id);
 			return found.id;
 		}
+	}
+
+	/**
+	 * Ids of documents in a dataset whose name collides with `name` — the name
+	 * itself plus any RAGFlow "(n)" duplicate of it (see isDuplicateName). Used to
+	 * clear existing copies before a re-upload so the new file replaces them
+	 * instead of being auto-suffixed. Narrowed server-side by keyword on the stem,
+	 * then matched exactly client-side; paginates fully.
+	 */
+	async findDuplicateDocumentIds(
+		datasetId: string,
+		name: string
+	): Promise<string[]> {
+		const dot = name.lastIndexOf(".");
+		const stem = dot > 0 ? name.slice(0, dot) : name;
+		const ids: string[] = [];
+		let page = 1;
+		// eslint-disable-next-line no-constant-condition
+		while (true) {
+			const data = await this.send<{ docs?: RagflowDocument[] }>({
+				url: `${this.base()}/datasets/${datasetId}/documents${this.query({
+					keywords: stem,
+					page,
+					page_size: PAGE_SIZE,
+				})}`,
+				method: "GET",
+				headers: this.headers(),
+			});
+			const docs = data?.docs ?? [];
+			for (const d of docs) {
+				if (d.id && isDuplicateName(d.name, name)) ids.push(d.id);
+			}
+			if (docs.length < PAGE_SIZE) break;
+			page += 1;
+		}
+		return ids;
 	}
 
 	/**
