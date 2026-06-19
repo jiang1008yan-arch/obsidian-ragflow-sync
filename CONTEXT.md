@@ -54,6 +54,7 @@ _Avoid_: properties, header.
 - A **Touch refresh** updates the **Synced state** without producing a visible **Change kind** (it stays "unchanged").
 - An **Ignore (snooze)** is applied to the **Change kind**s after the **Diff** runs: it sets an `ignored` flag that drops the entry from the Scan diff list, while the **Deletion rule** still produces the underlying `deleted` kind beneath it.
 - A Markdown file's **Frontmatter metadata** is uploaded separately from its body, via the metadata API, after the document upload.
+- An upload **replaces by name**: before uploading, the engine deletes the tracked document (by id) *and* every same-named document in the dataset — including RAGFlow's `name(n).ext` duplicates — because RAGFlow auto-suffixes a same-named upload instead of replacing it. This keeps one document per filename per dataset even when the local record was lost. Filenames must therefore be unique within a dataset.
 
 ## Example dialogue
 
