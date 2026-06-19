@@ -1169,9 +1169,15 @@ var SyncEngine = class {
             this.recordUpload(uploaded, up);
           } else if (change.kind === "deleted") {
             if (change.record) {
-              await this.client.deleteDocuments(change.record.datasetId, [
-                change.record.documentId
-              ]);
+              try {
+                await this.client.deleteDocuments(change.record.datasetId, [
+                  change.record.documentId
+                ]);
+              } catch (e) {
+                console.warn(
+                  `RAGFlow Sync: delete of ${change.vaultPath} failed (treating as already gone): ${e.message}`
+                );
+              }
             }
             this.store.deleteFile(change.vaultPath);
           }
