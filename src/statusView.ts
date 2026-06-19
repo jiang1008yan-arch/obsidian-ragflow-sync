@@ -3,9 +3,15 @@ import type RagflowSyncPlugin from "./main";
 import { ChangeKind, FileChange } from "./types";
 import { summarize } from "./syncEngine";
 import {
+	forceAllChanges,
+	forceSelectedChanges,
+	syncAllChanges,
+	tabData,
+	type PanelTab,
+} from "./panelState";
+import {
 	buildTree,
 	changeSummary,
-	diffVisible,
 	foldersWithChanges,
 	isFileLeaf,
 	leavesOf,
@@ -22,9 +28,6 @@ const KIND_LABEL: Record<ChangeKind, string> = {
 	unchanged: "Up to date",
 };
 
-/** The two trees the panel switches between. */
-type Tab = "diff" | "sync";
-
 export class RagflowSyncView extends ItemView {
 	plugin: RagflowSyncPlugin;
 	/** The full diff: every in-scope file (all kinds) plus deletions. */
@@ -32,7 +35,7 @@ export class RagflowSyncView extends ItemView {
 	private statusEl: HTMLElement | null = null;
 	private busy = false;
 	/** Which tab is showing: the Scan-diff list or the full Sync picker. */
-	private activeTab: Tab = "diff";
+	private activeTab: PanelTab = "diff";
 	/** Vault paths ticked in the current tab. Reset when the tab changes. */
 	private selected: Set<string> = new Set();
 	/** Folder paths currently expanded in the tree. */
@@ -107,7 +110,7 @@ export class RagflowSyncView extends ItemView {
 
 	/** Apply every Scan-diff-visible change that is not snoozed. */
 	async syncAll(): Promise<void> {
-		await this.syncChanges(this.changes.filter((c) => !c.ignored));
+		await this.syncChanges(syncAllChanges(this.changes));
 	}
 
 	/**
@@ -118,16 +121,11 @@ export class RagflowSyncView extends ItemView {
 	 * the RAGFlow side — without re-uploading the rest.
 	 */
 	async syncSelected(): Promise<void> {
-		const picks = this.changes.filter((c) => this.selected.has(c.vaultPath));
-		if (picks.length === 0) {
+		const forced = forceSelectedChanges(this.changes, this.selected);
+		if (forced.length === 0) {
 			new Notice("Tick files or folders to sync.");
 			return;
 		}
-		const forced = picks.map((c) =>
-			c.kind === "unchanged" || c.ignored
-				? { ...c, kind: "modified" as ChangeKind, hash: undefined, ignored: false }
-				: c
-		);
 		await this.syncChanges(forced);
 	}
 
@@ -138,14 +136,7 @@ export class RagflowSyncView extends ItemView {
 	 * selection instead.
 	 */
 	async forceSyncAll(): Promise<void> {
-		const forced = this.changes
-			.filter((c) => !c.ignored)
-			.map((c) =>
-				c.kind === "unchanged"
-					? { ...c, kind: "modified" as ChangeKind, hash: undefined }
-					: c
-			);
-		await this.syncChanges(forced);
+		await this.syncChanges(forceAllChanges(this.changes));
 	}
 
 	async syncChanges(changes: FileChange[]): Promise<void> {
@@ -205,10 +196,7 @@ export class RagflowSyncView extends ItemView {
 
 	/** The change list backing the active tab. */
 	private tabData(): FileChange[] {
-		return this.activeTab === "diff"
-			? diffVisible(this.changes)
-			: // Sync picker: every present in-scope file (deletions have no file).
-				this.changes.filter((c) => c.kind !== "deleted");
+		return tabData(this.activeTab, this.changes);
 	}
 
 	private render(): void {
@@ -250,7 +238,7 @@ export class RagflowSyncView extends ItemView {
 
 	/** The Scan diff / Sync segmented toggle. */
 	private renderTabs(bar: HTMLElement): void {
-		const tab = (id: Tab, label: string) => {
+		const tab = (id: PanelTab, label: string) => {
 			const btn = bar.createEl("button", { text: label });
 			btn.toggleClass("mod-cta", this.activeTab === id);
 			btn.onclick = () => {

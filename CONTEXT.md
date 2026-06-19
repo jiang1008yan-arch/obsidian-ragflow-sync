@@ -46,6 +46,26 @@ _Avoid_: freeze, exclude, skip.
 The note's leading YAML block, parsed and removed from the uploaded document body, then set as the RAGFlow document's metadata (the Update-document `meta_fields`). The vault note keeps its frontmatter.
 _Avoid_: properties, header.
 
+**Sync apply run**:
+One application of a set of non-unchanged **Change kind**s to RAGFlow and the **Synced state**. It owns the upload/delete lifecycle, replace-by-name behavior, **Frontmatter metadata** retry semantics, auto-parse queue, progress labels, periodic flushes, and per-file success/failure accounting.
+_Avoid_: executor, runner, applicator.
+
+**Vault access**:
+The narrow interface to Obsidian vault and metadata-cache behavior used by the sync code: listing a **Vault snapshot**, reading file bytes, finding markdown notes, reading frontmatter, resolving wikilinks, and collecting related notes.
+_Avoid_: app wrapper, obsidian helper.
+
+**Companion metadata**:
+The lookup that lets a metadata-less file inherit normalized **Frontmatter metadata** from a note in a **Dataset mapping**'s companion source folder when that note links to the file.
+_Avoid_: attachment metadata, sidecar metadata.
+
+**Settings migration**:
+The normalization of persisted plugin data into the current `RagflowSyncSettings` shape, including legacy mapping fields, legacy file-management records, old companion metadata fields, and old ignored paths.
+_Avoid_: load cleanup, settings fixup.
+
+**Panel state**:
+The pure state rules behind the Scan diff / Sync panel tabs: which **Change kind**s are visible, which changes "Sync all" applies, and how selected or forced uploads are promoted.
+_Avoid_: view state, UI helper.
+
 ## Relationships
 
 - A **Dataset mapping** defines part of what counts as **In-scope** and names the destination dataset.
@@ -55,6 +75,12 @@ _Avoid_: properties, header.
 - An **Ignore (snooze)** is applied to the **Change kind**s after the **Diff** runs: it sets an `ignored` flag that drops the entry from the Scan diff list, while the **Deletion rule** still produces the underlying `deleted` kind beneath it.
 - A Markdown file's **Frontmatter metadata** is uploaded separately from its body, via the metadata API, after the document upload.
 - An upload **replaces by name**: before uploading, the engine deletes the tracked document (by id) *and* every same-named document in the dataset — including RAGFlow's `name(n).ext` duplicates — because RAGFlow auto-suffixes a same-named upload instead of replacing it. This keeps one document per filename per dataset even when the local record was lost. Filenames must therefore be unique within a dataset.
+
+- A **Sync apply run** consumes **Change kind**s produced by the **Diff** and mutates **Synced state** only after RAGFlow accepts the corresponding remote operation. If **Frontmatter metadata** fails after upload, the document remains in RAGFlow, is still queued for auto-parse, and the **Synced state** record is marked `metaPending` so the next **Diff** re-surfaces it.
+- **Vault access** is the seam between Obsidian's runtime objects and the sync modules; tests can provide an in-memory adapter without knowing `app.vault` or `metadataCache`.
+- **Companion metadata** is built once per **Sync apply run** from the configured companion source folders and then queried for metadata-less uploads.
+- **Settings migration** runs after plugin data is loaded and before the plugin creates its RAGFlow client, **Synced state** store, and sync modules.
+- **Panel state** is consumed by the panel view so tab visibility and forced-upload rules can be tested without DOM rendering.
 
 ## Example dialogue
 
