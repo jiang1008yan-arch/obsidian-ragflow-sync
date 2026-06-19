@@ -1,25 +1,12 @@
 import { App, Notice, PluginSettingTab, Setting } from "obsidian";
 import type RagflowSyncPlugin from "./main";
 import { FolderInputSuggest } from "./folderSuggest";
-import { RagflowSyncSettings } from "./types";
+import { DEFAULT_SETTINGS } from "./settingsMigration";
 
 /** Strip leading/trailing slashes; "" means root/whole-vault. */
 function normalizeFolder(value: string): string {
 	return value.trim().replace(/^\/+|\/+$/g, "");
 }
-
-export const DEFAULT_SETTINGS: RagflowSyncSettings = {
-	ragflowBaseUrl: "http://127.0.0.1:9380",
-	apiKey: "",
-	datasetMappings: [],
-	extensions: ["md", "pdf", "docx"],
-	excludeGlobs: [".trash", ".obsidian"],
-	ignoredEntries: {},
-	internalizeLinks: false,
-	normalizeTables: true,
-	autoParse: true,
-	state: { files: {} },
-};
 
 export class RagflowSyncSettingTab extends PluginSettingTab {
 	plugin: RagflowSyncPlugin;

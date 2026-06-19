@@ -28,7 +28,7 @@ __export(main_exports, {
   default: () => RagflowSyncPlugin
 });
 module.exports = __toCommonJS(main_exports);
-var import_obsidian6 = require("obsidian");
+var import_obsidian7 = require("obsidian");
 
 // src/settings.ts
 var import_obsidian2 = require("obsidian");
@@ -59,18 +59,6 @@ var FolderInputSuggest = class extends import_obsidian.AbstractInputSuggest {
 function normalizeFolder(value) {
   return value.trim().replace(/^\/+|\/+$/g, "");
 }
-var DEFAULT_SETTINGS = {
-  ragflowBaseUrl: "http://127.0.0.1:9380",
-  apiKey: "",
-  datasetMappings: [],
-  extensions: ["md", "pdf", "docx"],
-  excludeGlobs: [".trash", ".obsidian"],
-  ignoredEntries: {},
-  internalizeLinks: false,
-  normalizeTables: true,
-  autoParse: true,
-  state: { files: {} }
-};
 var RagflowSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
   constructor(app, plugin) {
     super(app, plugin);
@@ -256,6 +244,69 @@ var RagflowSyncSettingTab = class extends import_obsidian2.PluginSettingTab {
     });
   }
 };
+
+// src/settingsMigration.ts
+var DEFAULT_SETTINGS = {
+  ragflowBaseUrl: "http://127.0.0.1:9380",
+  apiKey: "",
+  datasetMappings: [],
+  extensions: ["md", "pdf", "docx"],
+  excludeGlobs: [".trash", ".obsidian"],
+  ignoredEntries: {},
+  internalizeLinks: false,
+  normalizeTables: true,
+  autoParse: true,
+  state: { files: {} }
+};
+function normalizeSettings(data) {
+  const settings = Object.assign({}, DEFAULT_SETTINGS, data);
+  settings.state = Object.assign(
+    { files: {} },
+    data.state ?? {}
+  );
+  settings.ignoredEntries = Object.assign({}, settings.ignoredEntries ?? {});
+  migrateLegacyMappings(settings, data);
+  removeObsoleteCompanionSettings(settings);
+  dropLegacyRecords(settings);
+  migrateIgnoredPaths(settings, data);
+  return settings;
+}
+function migrateLegacyMappings(settings, data) {
+  const legacyMappings = data.folderMappings;
+  if (legacyMappings && settings.datasetMappings.length === 0) {
+    settings.datasetMappings = legacyMappings.map((m) => ({
+      vaultPath: m.vaultPath ?? "",
+      datasetName: m.ragflowBaseFolder ?? ""
+    }));
+  }
+  delete settings.folderMappings;
+}
+function removeObsoleteCompanionSettings(settings) {
+  delete settings.companionMetadataPaths;
+  for (const mapping of settings.datasetMappings) {
+    delete mapping.companionMetadata;
+  }
+}
+function dropLegacyRecords(settings) {
+  const files = settings.state.files;
+  const isLegacyRecord = Object.values(files).some(
+    (r) => r.documentId === void 0
+  );
+  if (isLegacyRecord) {
+    settings.state.files = {};
+  }
+}
+function migrateIgnoredPaths(settings, data) {
+  const legacyIgnored = data.ignoredPaths;
+  if (Array.isArray(legacyIgnored)) {
+    for (const path of legacyIgnored) {
+      if (typeof path === "string" && !settings.ignoredEntries[path]) {
+        settings.ignoredEntries[path] = { pending: true };
+      }
+    }
+  }
+  delete settings.ignoredPaths;
+}
 
 // src/ragflowClient.ts
 var import_obsidian3 = require("obsidian");
@@ -579,9 +630,6 @@ var SyncStateStore = class {
   }
 };
 
-// src/syncEngine.ts
-var import_obsidian4 = require("obsidian");
-
 // src/hash.ts
 async function sha256(data) {
   const digest = await crypto.subtle.digest("SHA-256", data);
@@ -774,6 +822,9 @@ function markIgnored(changes, ignoredEntries, currentHashes) {
   }
   return { changes, staleIgnores, captured };
 }
+
+// src/syncApplyRun.ts
+var import_obsidian4 = require("obsidian");
 
 // src/internalize.ts
 var IMAGE_EXT = /\.(png|jpe?g|gif|svg|webp|bmp)$/i;
@@ -1056,7 +1107,54 @@ function normalizeTables(src) {
   return out.join("\n");
 }
 
-// src/syncEngine.ts
+// src/companionMetadata.ts
+async function buildCompanionIndex(settings, vault) {
+  const index = /* @__PURE__ */ new Map();
+  const folders = new Set(
+    settings.datasetMappings.map((m) => m.companionSourceFolder).filter((f) => !!f && f.length > 0)
+  );
+  for (const folder of folders) {
+    const map = /* @__PURE__ */ new Map();
+    for (const note of vault.markdownFilesUnder(folder)) {
+      const fm = await vault.frontmatter(note);
+      if (!fm)
+        continue;
+      const targets = frontmatterLinkTargets(fm);
+      if (targets.length === 0)
+        continue;
+      const meta = normalizeMeta(fm);
+      for (const target of targets) {
+        indexCompanionTarget(map, vault, note, target, meta);
+      }
+    }
+    index.set(folder, map);
+  }
+  return index;
+}
+function indexCompanionTarget(map, vault, note, linkpath, meta) {
+  const dest = vault.resolveLink(linkpath, note.path);
+  if (dest)
+    map.set(dest.path, meta);
+  const name = (linkpath.split("/").pop() ?? linkpath).trim();
+  if (!name)
+    return;
+  map.set(`name:${name.toLowerCase()}`, meta);
+  const dot = name.lastIndexOf(".");
+  const base = dot > 0 ? name.slice(0, dot) : name;
+  map.set(`base:${base.toLowerCase()}`, meta);
+}
+function lookupCompanion(companionIndex, sourceFolder, file) {
+  const map = companionIndex.get(sourceFolder);
+  if (!map)
+    return void 0;
+  const direct = map.get(file.path) ?? map.get(`name:${file.name.toLowerCase()}`) ?? map.get(`base:${file.basename.toLowerCase()}`);
+  if (direct)
+    return direct;
+  const stem = splitPartStem(file.basename);
+  return stem ? map.get(`base:${stem.toLowerCase()}`) : void 0;
+}
+
+// src/syncApplyRun.ts
 var PROCESSING_VERSION = 4;
 var CONTENT_TYPES = {
   md: "text/markdown",
@@ -1074,9 +1172,283 @@ var CONTENT_TYPES = {
   gif: "image/gif"
 };
 var FLUSH_EVERY = 25;
-var SyncEngine = class {
-  constructor(app, client, store, getSettings) {
+async function applySyncRun(input) {
+  const run = new SyncApplyRun(input);
+  return run.apply();
+}
+var SyncApplyRun = class {
+  constructor(input) {
+    this.vault = input.vault;
+    this.client = input.client;
+    this.store = input.store;
+    this.settings = input.settings;
+    this.changes = input.changes;
+    this.onProgress = input.onProgress;
+    this.processingVersion = input.processingVersion ?? PROCESSING_VERSION;
+  }
+  async apply() {
+    const actionable = this.changes.filter((c) => c.kind !== "unchanged");
+    let done = 0;
+    const result = { ok: 0, failed: 0, errors: [], parsed: 0 };
+    const uploaded = /* @__PURE__ */ new Map();
+    const companionIndex = await buildCompanionIndex(this.settings, this.vault);
+    let sinceFlush = 0;
+    try {
+      for (const change of actionable) {
+        try {
+          if (change.kind === "new") {
+            const up = await this.syncUpload(change, void 0, companionIndex);
+            this.recordUpload(uploaded, up);
+            if (up.error)
+              throw up.error;
+          } else if (change.kind === "modified") {
+            const up = await this.syncUpload(
+              change,
+              change.record,
+              companionIndex
+            );
+            this.recordUpload(uploaded, up);
+            if (up.error)
+              throw up.error;
+          } else if (change.kind === "deleted") {
+            await this.syncDelete(change);
+          }
+          result.ok += 1;
+        } catch (e) {
+          result.failed += 1;
+          result.errors.push(`${change.vaultPath}: ${e.message}`);
+        }
+        done += 1;
+        if (++sinceFlush >= FLUSH_EVERY) {
+          await this.store.flush();
+          sinceFlush = 0;
+        }
+        this.onProgress?.(done, actionable.length, change.vaultPath);
+      }
+    } finally {
+      await this.store.flush();
+    }
+    if (this.settings.autoParse) {
+      await this.parseUploaded(uploaded, done, actionable.length, result);
+    }
+    return result;
+  }
+  async syncDelete(change) {
+    if (change.record) {
+      try {
+        await this.client.deleteDocuments(change.record.datasetId, [
+          change.record.documentId
+        ]);
+      } catch (e) {
+        console.warn(
+          `RAGFlow Sync: delete of ${change.vaultPath} failed (treating as already gone): ${e.message}`
+        );
+      }
+    }
+    this.store.deleteFile(change.vaultPath);
+  }
+  async parseUploaded(uploaded, done, total, result) {
+    for (const [datasetId, ids] of uploaded) {
+      this.onProgress?.(done, total, `Parsing ${ids.length} document(s)...`);
+      try {
+        await this.client.parseDocuments(datasetId, ids);
+        result.parsed += ids.length;
+      } catch (e) {
+        result.errors.push(
+          `parse (dataset ${datasetId}): ${e.message}`
+        );
+      }
+    }
+  }
+  recordUpload(uploaded, up) {
+    const ids = uploaded.get(up.datasetId);
+    if (ids)
+      ids.push(up.documentId);
+    else
+      uploaded.set(up.datasetId, [up.documentId]);
+  }
+  async syncUpload(change, oldRecord, companionIndex) {
+    const file = this.vault.getFile(change.vaultPath);
+    if (!file) {
+      throw new Error("File no longer exists in vault.");
+    }
+    const bytes = await this.vault.readBinary(file.path);
+    const hash = change.hash ?? await sha256(bytes);
+    const datasetId = await this.datasetIdFor(change);
+    if (oldRecord) {
+      try {
+        await this.client.deleteDocuments(oldRecord.datasetId, [
+          oldRecord.documentId
+        ]);
+      } catch (_e) {
+      }
+    }
+    await this.clearDuplicateDocuments(datasetId, file.name);
+    const prepared = file.extension.toLowerCase() === "md" ? this.prepareMarkdown(bytes, file.path) : { uploadBytes: bytes, meta: {} };
+    const uploadBytes = prepared.uploadBytes;
+    let meta = prepared.meta;
+    const sourceFolder = change.mapping?.companionSourceFolder;
+    if (Object.keys(meta).length === 0 && sourceFolder) {
+      const found = lookupCompanion(companionIndex, sourceFolder, file);
+      if (found) {
+        meta = found;
+      } else {
+        console.warn(
+          `RAGFlow Sync: no companion metadata for ${change.vaultPath} - no note in "${sourceFolder}" has a frontmatter link to it, so the document is uploaded without metadata.`
+        );
+      }
+    }
+    const contentType = CONTENT_TYPES[file.extension.toLowerCase()];
+    const doc = await this.client.uploadDocument(
+      datasetId,
+      file.name,
+      uploadBytes,
+      contentType
+    );
+    let metaError = null;
+    if (Object.keys(meta).length > 0) {
+      try {
+        await this.client.setDocumentMetadata(datasetId, doc.id, meta);
+      } catch (e) {
+        metaError = e;
+        console.error(
+          `RAGFlow Sync: failed to set metadata for ${change.vaultPath}:`,
+          e,
+          "\nmeta_fields sent:",
+          JSON.stringify(meta)
+        );
+      }
+    }
+    this.store.setFile(change.vaultPath, {
+      documentId: doc.id,
+      datasetId,
+      hash,
+      size: file.stat.size,
+      mtime: file.stat.mtime,
+      lastSyncedAt: Date.now(),
+      processingVersion: this.processingVersion,
+      ...metaError ? { metaPending: true } : {}
+    });
+    delete this.settings.ignoredEntries[change.vaultPath];
+    return {
+      datasetId,
+      documentId: doc.id,
+      ...metaError ? {
+        error: new Error(
+          `uploaded, but setting metadata failed: ${metaError.message} (document kept; metadata will be retried on the next scan)`
+        )
+      } : {}
+    };
+  }
+  async clearDuplicateDocuments(datasetId, name) {
+    try {
+      const dupes = await this.client.findDuplicateDocumentIds(datasetId, name);
+      if (dupes.length > 0) {
+        await this.client.deleteDocuments(datasetId, dupes);
+      }
+    } catch (e) {
+      console.warn(
+        `RAGFlow Sync: could not clear duplicates of ${name} before upload: ${e.message}`
+      );
+    }
+  }
+  async datasetIdFor(change) {
+    if (!change.mapping) {
+      throw new Error("Cannot place a file without an owning mapping.");
+    }
+    return this.client.ensureDatasetId(change.mapping.datasetName);
+  }
+  prepareMarkdown(bytes, path) {
+    const text = new TextDecoder().decode(bytes);
+    const { yaml, body } = splitFrontmatter(text);
+    let meta = {};
+    if (yaml !== null) {
+      try {
+        meta = normalizeMeta((0, import_obsidian4.parseYaml)(yaml));
+      } catch (e) {
+        console.error(`RAGFlow Sync: invalid frontmatter in ${path}:`, e);
+      }
+    }
+    let transformed = this.settings.internalizeLinks ? internalizeMarkdown(body, this.vault.relatedLinks(path)) : body;
+    if (this.settings.normalizeTables) {
+      transformed = normalizeTables(transformed);
+    }
+    return {
+      uploadBytes: new TextEncoder().encode(transformed).buffer,
+      meta
+    };
+  }
+};
+
+// src/vaultAccess.ts
+var import_obsidian5 = require("obsidian");
+var ObsidianVaultAccess = class {
+  constructor(app) {
     this.app = app;
+  }
+  listSnapshot() {
+    return this.app.vault.getFiles().map((f) => ({
+      path: f.path,
+      size: f.stat.size,
+      mtime: f.stat.mtime
+    }));
+  }
+  folderExists(path) {
+    return this.app.vault.getAbstractFileByPath(path) !== null;
+  }
+  getFile(path) {
+    const file = this.app.vault.getAbstractFileByPath(path);
+    return file instanceof import_obsidian5.TFile ? file : void 0;
+  }
+  readBinary(path) {
+    return this.app.vault.adapter.readBinary(path);
+  }
+  markdownFilesUnder(folder) {
+    const prefix = `${folder}/`;
+    return this.app.vault.getMarkdownFiles().filter((f) => f.path === folder || f.path.startsWith(prefix));
+  }
+  async frontmatter(file) {
+    const note = this.getFile(file.path);
+    if (!note)
+      return void 0;
+    const cached = this.app.metadataCache.getFileCache(note)?.frontmatter;
+    if (cached)
+      return cached;
+    try {
+      const text = await this.app.vault.cachedRead(note);
+      const { yaml } = splitFrontmatter(text);
+      if (yaml === null)
+        return void 0;
+      const parsed = (0, import_obsidian5.parseYaml)(yaml);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        return parsed;
+      }
+      return void 0;
+    } catch (_e) {
+      return void 0;
+    }
+  }
+  resolveLink(linkpath, sourcePath) {
+    return this.app.metadataCache.getFirstLinkpathDest(linkpath, sourcePath) ?? void 0;
+  }
+  relatedLinks(path) {
+    const resolved = this.app.metadataCache.resolvedLinks ?? {};
+    const isNote = (p) => p.toLowerCase().endsWith(".md");
+    const outgoing = Object.keys(resolved[path] ?? {}).filter((target) => target !== path && isNote(target)).map(noteTitle);
+    const incoming = [];
+    for (const [source, targets] of Object.entries(resolved)) {
+      if (source !== path && isNote(source) && targets[path]) {
+        incoming.push(noteTitle(source));
+      }
+    }
+    return { outgoing, incoming };
+  }
+};
+
+// src/syncEngine.ts
+var SyncEngine = class {
+  constructor(app, client, store, getSettings, vault = new ObsidianVaultAccess(app)) {
+    this.vault = vault;
     this.client = client;
     this.store = store;
     this.getSettings = getSettings;
@@ -1092,19 +1464,15 @@ var SyncEngine = class {
   }
   /** Obsidian adapter for the vault-snapshot seam: every file, unfiltered. */
   buildSnapshot() {
-    return this.app.vault.getFiles().map((f) => ({
-      path: f.path,
-      size: f.stat.size,
-      mtime: f.stat.mtime
-    }));
+    return this.vault.listSnapshot();
   }
   async hashPath(path) {
-    const bytes = await this.app.vault.adapter.readBinary(path);
+    const bytes = await this.vault.readBinary(path);
     return sha256(bytes);
   }
   missingMappings() {
     return this.getSettings().datasetMappings.filter(
-      (m) => m.vaultPath.length > 0 && this.app.vault.getAbstractFileByPath(m.vaultPath) === null
+      (m) => m.vaultPath.length > 0 && !this.vault.folderExists(m.vaultPath)
     );
   }
   async computeDiff() {
@@ -1145,11 +1513,8 @@ var SyncEngine = class {
     };
   }
   /**
-   * Current content hashes for the ignored files whose snooze decision stats
-   * alone cannot make: a `pending` (un-snapshotted) ignore, or a snapshot whose
-   * size/mtime no longer match the file. Files already carrying a hash on their
-   * change, deleted files, and stat-matched fast paths are skipped. Read
-   * failures are left unset (markIgnored then re-surfaces that entry).
+   * Current content hashes for ignored files whose snooze decision cannot be
+   * made from stats alone.
    */
   async snoozeHashes(changes, ignoredEntries) {
     const out = /* @__PURE__ */ new Map();
@@ -1169,310 +1534,27 @@ var SyncEngine = class {
     return out;
   }
   /**
-   * Snapshot a path for the ignore list at the moment the user ignores it:
-   * `{deleted:true}` if it is gone from the vault, otherwise its current hash and
-   * stats. Used by the panel's "Ignore selected" so an ignore takes effect
-   * without waiting for the next scan.
+   * Snapshot a path for Ignore (snooze) at the moment the user ignores it:
+   * `{deleted:true}` if it is gone from the vault, otherwise its current hash
+   * and stats.
    */
   async snapshotForIgnore(path) {
-    const file = this.app.vault.getAbstractFileByPath(path);
-    if (!(file instanceof import_obsidian4.TFile))
+    const file = this.vault.getFile(path);
+    if (!file)
       return { deleted: true };
     const hash = await this.hashPath(path);
     return { hash, size: file.stat.size, mtime: file.stat.mtime };
   }
-  async datasetIdFor(change) {
-    if (!change.mapping) {
-      throw new Error("Cannot place a file without an owning mapping.");
-    }
-    return this.client.ensureDatasetId(change.mapping.datasetName);
-  }
   async applyChanges(changes, onProgress) {
-    const actionable = changes.filter((c) => c.kind !== "unchanged");
-    let done = 0;
-    const result = { ok: 0, failed: 0, errors: [], parsed: 0 };
-    const uploaded = /* @__PURE__ */ new Map();
-    const companionIndex = await this.buildCompanionIndex();
-    let sinceFlush = 0;
-    try {
-      for (const change of actionable) {
-        try {
-          if (change.kind === "new") {
-            const up = await this.syncUpload(change, void 0, companionIndex);
-            this.recordUpload(uploaded, up);
-          } else if (change.kind === "modified") {
-            const up = await this.syncUpload(
-              change,
-              change.record,
-              companionIndex
-            );
-            this.recordUpload(uploaded, up);
-          } else if (change.kind === "deleted") {
-            if (change.record) {
-              try {
-                await this.client.deleteDocuments(change.record.datasetId, [
-                  change.record.documentId
-                ]);
-              } catch (e) {
-                console.warn(
-                  `RAGFlow Sync: delete of ${change.vaultPath} failed (treating as already gone): ${e.message}`
-                );
-              }
-            }
-            this.store.deleteFile(change.vaultPath);
-          }
-          result.ok += 1;
-        } catch (e) {
-          result.failed += 1;
-          result.errors.push(`${change.vaultPath}: ${e.message}`);
-        }
-        done += 1;
-        if (++sinceFlush >= FLUSH_EVERY) {
-          await this.store.flush();
-          sinceFlush = 0;
-        }
-        onProgress?.(done, actionable.length, change.vaultPath);
-      }
-    } finally {
-      await this.store.flush();
-    }
-    if (this.getSettings().autoParse) {
-      for (const [datasetId, ids] of uploaded) {
-        onProgress?.(done, actionable.length, `Parsing ${ids.length} document(s)\u2026`);
-        try {
-          await this.client.parseDocuments(datasetId, ids);
-          result.parsed += ids.length;
-        } catch (e) {
-          result.errors.push(
-            `parse (dataset ${datasetId}): ${e.message}`
-          );
-        }
-      }
-    }
-    return result;
-  }
-  /** Group an uploaded document id under its dataset for the parse step. */
-  recordUpload(uploaded, up) {
-    const ids = uploaded.get(up.datasetId);
-    if (ids)
-      ids.push(up.documentId);
-    else
-      uploaded.set(up.datasetId, [up.documentId]);
-  }
-  async syncUpload(change, oldRecord, companionIndex) {
-    const file = this.app.vault.getAbstractFileByPath(change.vaultPath);
-    if (!(file instanceof import_obsidian4.TFile)) {
-      throw new Error("File no longer exists in vault.");
-    }
-    const bytes = await this.app.vault.adapter.readBinary(file.path);
-    const hash = change.hash ?? await sha256(bytes);
-    const datasetId = await this.datasetIdFor(change);
-    if (oldRecord) {
-      try {
-        await this.client.deleteDocuments(oldRecord.datasetId, [
-          oldRecord.documentId
-        ]);
-      } catch (_e) {
-      }
-    }
-    try {
-      const dupes = await this.client.findDuplicateDocumentIds(
-        datasetId,
-        file.name
-      );
-      if (dupes.length > 0) {
-        await this.client.deleteDocuments(datasetId, dupes);
-      }
-    } catch (e) {
-      console.warn(
-        `RAGFlow Sync: could not clear duplicates of ${file.name} before upload: ${e.message}`
-      );
-    }
-    const prepared = file.extension.toLowerCase() === "md" ? this.prepareMarkdown(bytes, file.path) : { uploadBytes: bytes, meta: {} };
-    const uploadBytes = prepared.uploadBytes;
-    let meta = prepared.meta;
-    const sourceFolder = change.mapping?.companionSourceFolder;
-    if (Object.keys(meta).length === 0 && sourceFolder) {
-      const found = this.lookupCompanion(companionIndex, sourceFolder, file);
-      if (found) {
-        meta = found;
-      } else {
-        console.warn(
-          `RAGFlow Sync: no companion metadata for ${change.vaultPath} \u2014 no note in "${sourceFolder}" has a frontmatter link to it, so the document is uploaded without metadata.`
-        );
-      }
-    }
-    const contentType = CONTENT_TYPES[file.extension.toLowerCase()];
-    const doc = await this.client.uploadDocument(
-      datasetId,
-      file.name,
-      uploadBytes,
-      contentType
-    );
-    let metaError = null;
-    if (Object.keys(meta).length > 0) {
-      try {
-        await this.client.setDocumentMetadata(datasetId, doc.id, meta);
-      } catch (e) {
-        metaError = e;
-        console.error(
-          `RAGFlow Sync: failed to set metadata for ${change.vaultPath}:`,
-          e,
-          "\nmeta_fields sent:",
-          JSON.stringify(meta)
-        );
-      }
-    }
-    this.store.setFile(change.vaultPath, {
-      documentId: doc.id,
-      datasetId,
-      hash,
-      size: file.stat.size,
-      mtime: file.stat.mtime,
-      lastSyncedAt: Date.now(),
-      processingVersion: PROCESSING_VERSION,
-      ...metaError ? { metaPending: true } : {}
+    return applySyncRun({
+      vault: this.vault,
+      client: this.client,
+      store: this.store,
+      settings: this.getSettings(),
+      changes,
+      onProgress,
+      processingVersion: PROCESSING_VERSION
     });
-    delete this.getSettings().ignoredEntries[change.vaultPath];
-    if (metaError) {
-      throw new Error(
-        `uploaded, but setting metadata failed: ${metaError.message} (document kept; metadata will be retried on the next scan)`
-      );
-    }
-    return { datasetId, documentId: doc.id };
-  }
-  /**
-   * Decode a Markdown file, strip its YAML frontmatter (parsed out as metadata),
-   * optionally internalize its links and convert its tables to HTML, then
-   * re-encode the body as UTF-8. The frontmatter becomes the document's RAGFlow
-   * metadata rather than living in the uploaded text.
-   */
-  prepareMarkdown(bytes, path) {
-    const text = new TextDecoder().decode(bytes);
-    const { yaml, body } = splitFrontmatter(text);
-    let meta = {};
-    if (yaml !== null) {
-      try {
-        meta = normalizeMeta((0, import_obsidian4.parseYaml)(yaml));
-      } catch (e) {
-        console.error(`RAGFlow Sync: invalid frontmatter in ${path}:`, e);
-      }
-    }
-    const settings = this.getSettings();
-    let transformed = settings.internalizeLinks ? internalizeMarkdown(body, this.relatedLinks(path)) : body;
-    if (settings.normalizeTables) {
-      transformed = normalizeTables(transformed);
-    }
-    return {
-      uploadBytes: new TextEncoder().encode(transformed).buffer,
-      meta
-    };
-  }
-  /**
-   * Build the companion-metadata lookup for this apply run. For each distinct
-   * source folder configured on a mapping, scan that folder's notes; whenever a
-   * note's frontmatter links to a file (e.g. `file: "[[report.pdf]]"`), record
-   * that the linked file inherits the note's normalized frontmatter. Keyed by
-   * source folder so an attachment only matches notes from its own mapping's
-   * folder. The link target is read straight from the frontmatter text and
-   * indexed under several keys (see indexCompanionTarget) so resolution survives
-   * a link that carries an extension, omits one, or does not resolve uniquely.
-   */
-  async buildCompanionIndex() {
-    const index = /* @__PURE__ */ new Map();
-    const folders = new Set(
-      this.getSettings().datasetMappings.map((m) => m.companionSourceFolder).filter((f) => !!f && f.length > 0)
-    );
-    for (const folder of folders) {
-      const map = /* @__PURE__ */ new Map();
-      const prefix = `${folder}/`;
-      const notes = this.app.vault.getMarkdownFiles().filter((f) => f.path === folder || f.path.startsWith(prefix));
-      for (const note of notes) {
-        const fm = this.app.metadataCache.getFileCache(note)?.frontmatter ?? await this.readFrontmatter(note);
-        if (!fm)
-          continue;
-        const targets = frontmatterLinkTargets(fm);
-        if (targets.length === 0)
-          continue;
-        const meta = normalizeMeta(fm);
-        for (const target of targets) {
-          this.indexCompanionTarget(map, note, target, meta);
-        }
-      }
-      index.set(folder, map);
-    }
-    return index;
-  }
-  /** Parse a note's frontmatter straight from disk; undefined when absent/invalid. */
-  async readFrontmatter(note) {
-    try {
-      const text = await this.app.vault.cachedRead(note);
-      const { yaml } = splitFrontmatter(text);
-      if (yaml === null)
-        return void 0;
-      const parsed = (0, import_obsidian4.parseYaml)(yaml);
-      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-        return parsed;
-      }
-      return void 0;
-    } catch (_e) {
-      return void 0;
-    }
-  }
-  /**
-   * Record a companion match under every key a later upload might look it up by,
-   * so a link survives whether or not it carries an extension and whether or not
-   * it resolves to a unique vault path: the resolved path (when Obsidian can
-   * resolve it), plus the link's file name and its extension-less base, both
-   * lower-cased and prefixed so the key spaces never collide.
-   */
-  indexCompanionTarget(map, note, linkpath, meta) {
-    const dest = this.app.metadataCache.getFirstLinkpathDest(
-      linkpath,
-      note.path
-    );
-    if (dest)
-      map.set(dest.path, meta);
-    const name = (linkpath.split("/").pop() ?? linkpath).trim();
-    if (!name)
-      return;
-    map.set(`name:${name.toLowerCase()}`, meta);
-    const dot = name.lastIndexOf(".");
-    const base = dot > 0 ? name.slice(0, dot) : name;
-    map.set(`base:${base.toLowerCase()}`, meta);
-  }
-  /**
-   * A file's companion metadata: by resolved path, then file name, then base.
-   * As a last resort, a split part named `<stem>_p<start>-<end>` falls back to
-   * its stem, so an oversized document carved into page-range parts can share a
-   * single source note that links to the whole document.
-   */
-  lookupCompanion(companionIndex, sourceFolder, file) {
-    const map = companionIndex.get(sourceFolder);
-    if (!map)
-      return void 0;
-    const direct = map.get(file.path) ?? map.get(`name:${file.name.toLowerCase()}`) ?? map.get(`base:${file.basename.toLowerCase()}`);
-    if (direct)
-      return direct;
-    const stem = splitPartStem(file.basename);
-    return stem ? map.get(`base:${stem.toLowerCase()}`) : void 0;
-  }
-  /**
-   * Outgoing links and backlinks for a note, as titles, from Obsidian's
-   * resolved-link graph. Only note-to-note (.md) relationships are listed;
-   * attachments and unresolved links are ignored.
-   */
-  relatedLinks(path) {
-    const resolved = this.app.metadataCache.resolvedLinks ?? {};
-    const isNote = (p) => p.toLowerCase().endsWith(".md");
-    const outgoing = Object.keys(resolved[path] ?? {}).filter((target) => target !== path && isNote(target)).map(noteTitle);
-    const incoming = [];
-    for (const [source, targets] of Object.entries(resolved)) {
-      if (source !== path && isNote(source) && targets[path]) {
-        incoming.push(noteTitle(source));
-      }
-    }
-    return { outgoing, incoming };
   }
 };
 function summarize(changes) {
@@ -1488,7 +1570,7 @@ function summarize(changes) {
 }
 
 // src/statusView.ts
-var import_obsidian5 = require("obsidian");
+var import_obsidian6 = require("obsidian");
 
 // src/tree.ts
 function buildTree(changes) {
@@ -1579,6 +1661,28 @@ function foldersWithChanges(changes) {
   return set;
 }
 
+// src/panelState.ts
+function tabData(tab, changes) {
+  return tab === "diff" ? diffVisible(changes) : changes.filter((c) => c.kind !== "deleted");
+}
+function syncAllChanges(changes) {
+  return changes.filter((c) => !c.ignored && c.kind !== "unchanged");
+}
+function forceSelectedChanges(changes, selected) {
+  return changes.filter((c) => selected.has(c.vaultPath)).map(forceUploadChange);
+}
+function forceAllChanges(changes) {
+  return changes.filter((c) => !c.ignored).map(forceUploadChange);
+}
+function forceUploadChange(change) {
+  return change.kind === "unchanged" || change.ignored ? {
+    ...change,
+    kind: "modified",
+    hash: void 0,
+    ...change.ignored ? { ignored: false } : {}
+  } : change;
+}
+
 // src/statusView.ts
 var VIEW_TYPE_RAGFLOW_SYNC = "ragflow-sync-view";
 var KIND_LABEL = {
@@ -1587,7 +1691,7 @@ var KIND_LABEL = {
   deleted: "Deleted",
   unchanged: "Up to date"
 };
-var RagflowSyncView = class extends import_obsidian5.ItemView {
+var RagflowSyncView = class extends import_obsidian6.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     /** The full diff: every in-scope file (all kinds) plus deletions. */
@@ -1627,7 +1731,7 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
     if (this.busy)
       return;
     if (!this.plugin.settings.apiKey) {
-      new import_obsidian5.Notice("Set your RAGFlow API key in settings first.");
+      new import_obsidian6.Notice("Set your RAGFlow API key in settings first.");
       return;
     }
     this.busy = true;
@@ -1638,7 +1742,7 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
       this.selected.clear();
       this.expanded = foldersWithChanges(this.changes);
       if (result.missingMappings.length > 0) {
-        new import_obsidian5.Notice(
+        new import_obsidian6.Notice(
           `Some mapped folders were not found: ${result.missingMappings.map((m) => m.vaultPath).join(", ")}`
         );
       }
@@ -1648,7 +1752,7 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
         `Scan complete: ${counts.new} new, ${counts.modified} modified, ${counts.deleted} deleted, ${counts.unchanged} up to date.`
       );
     } catch (e) {
-      new import_obsidian5.Notice(`Scan failed: ${e.message}`);
+      new import_obsidian6.Notice(`Scan failed: ${e.message}`);
       this.setStatus(`Scan failed: ${e.message}`);
     } finally {
       this.busy = false;
@@ -1656,7 +1760,7 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
   }
   /** Apply every Scan-diff-visible change that is not snoozed. */
   async syncAll() {
-    await this.syncChanges(this.changes.filter((c) => !c.ignored));
+    await this.syncChanges(syncAllChanges(this.changes));
   }
   /**
    * Re-upload exactly the files the user ticked in the Sync tab, regardless of
@@ -1666,14 +1770,11 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
    * the RAGFlow side — without re-uploading the rest.
    */
   async syncSelected() {
-    const picks = this.changes.filter((c) => this.selected.has(c.vaultPath));
-    if (picks.length === 0) {
-      new import_obsidian5.Notice("Tick files or folders to sync.");
+    const forced = forceSelectedChanges(this.changes, this.selected);
+    if (forced.length === 0) {
+      new import_obsidian6.Notice("Tick files or folders to sync.");
       return;
     }
-    const forced = picks.map(
-      (c) => c.kind === "unchanged" || c.ignored ? { ...c, kind: "modified", hash: void 0, ignored: false } : c
-    );
     await this.syncChanges(forced);
   }
   /**
@@ -1683,17 +1784,14 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
    * selection instead.
    */
   async forceSyncAll() {
-    const forced = this.changes.filter((c) => !c.ignored).map(
-      (c) => c.kind === "unchanged" ? { ...c, kind: "modified", hash: void 0 } : c
-    );
-    await this.syncChanges(forced);
+    await this.syncChanges(forceAllChanges(this.changes));
   }
   async syncChanges(changes) {
     if (this.busy)
       return;
     const actionable = changes.filter((c) => c.kind !== "unchanged");
     if (actionable.length === 0) {
-      new import_obsidian5.Notice("Nothing to sync.");
+      new import_obsidian6.Notice("Nothing to sync.");
       return;
     }
     this.busy = true;
@@ -1709,12 +1807,12 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
         msg += ` Parsing ${result.parsed}.`;
       if (result.failed > 0)
         msg += ` ${result.failed} failed.`;
-      new import_obsidian5.Notice(msg);
+      new import_obsidian6.Notice(msg);
       if (result.errors.length > 0) {
         console.error("RAGFlow Sync errors:", result.errors);
       }
     } catch (e) {
-      new import_obsidian5.Notice(`Sync failed: ${e.message}`);
+      new import_obsidian6.Notice(`Sync failed: ${e.message}`);
     } finally {
       this.busy = false;
       await this.scan();
@@ -1727,7 +1825,7 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
    */
   async ignoreSelected() {
     if (this.selected.size === 0) {
-      new import_obsidian5.Notice("Tick the files you want to ignore.");
+      new import_obsidian6.Notice("Tick the files you want to ignore.");
       return;
     }
     const picked = [...this.selected];
@@ -1741,14 +1839,11 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
     }
     this.selected.clear();
     this.render();
-    new import_obsidian5.Notice(`Ignoring ${picked.length} file(s).`);
+    new import_obsidian6.Notice(`Ignoring ${picked.length} file(s).`);
   }
   /** The change list backing the active tab. */
   tabData() {
-    return this.activeTab === "diff" ? diffVisible(this.changes) : (
-      // Sync picker: every present in-scope file (deletions have no file).
-      this.changes.filter((c) => c.kind !== "deleted")
-    );
+    return tabData(this.activeTab, this.changes);
   }
   render() {
     const container = this.containerEl.children[1];
@@ -1911,7 +2006,7 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
 };
 
 // src/main.ts
-var RagflowSyncPlugin = class extends import_obsidian6.Plugin {
+var RagflowSyncPlugin = class extends import_obsidian7.Plugin {
   async onload() {
     await this.loadSettings();
     this.client = new RagflowClient(() => this.settings);
@@ -1987,53 +2082,12 @@ var RagflowSyncPlugin = class extends import_obsidian6.Plugin {
       workspace.revealLeaf(leaf);
       return leaf.view;
     }
-    new import_obsidian6.Notice("Could not open RAGFlow Sync panel.");
+    new import_obsidian7.Notice("Could not open RAGFlow Sync panel.");
     return null;
   }
   async loadSettings() {
     const data = await this.loadData() ?? {};
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
-    this.settings.state = Object.assign({ files: {} }, data.state ?? {});
-    this.migrateLegacyData(data);
-  }
-  /**
-   * Migrate data.json written by the File-Management era of the plugin:
-   * `folderMappings` (vault folder -> RAGFlow folder path) become
-   * `datasetMappings` (vault folder -> dataset name), and any synced records
-   * still keyed to File-Management files are dropped so everything re-syncs
-   * into datasets on the next run.
-   */
-  migrateLegacyData(data) {
-    const legacyMappings = data.folderMappings;
-    if (legacyMappings && this.settings.datasetMappings.length === 0) {
-      this.settings.datasetMappings = legacyMappings.map((m) => ({
-        vaultPath: m.vaultPath ?? "",
-        datasetName: m.ragflowBaseFolder ?? ""
-      }));
-    }
-    delete this.settings.folderMappings;
-    delete this.settings.companionMetadataPaths;
-    for (const mapping of this.settings.datasetMappings) {
-      delete mapping.companionMetadata;
-    }
-    const files = this.settings.state.files;
-    const isLegacyRecord = Object.values(files).some(
-      (r) => r.documentId === void 0
-    );
-    if (isLegacyRecord) {
-      this.settings.state.files = {};
-    }
-    const legacyIgnored = data.ignoredPaths;
-    if (Array.isArray(legacyIgnored)) {
-      if (!this.settings.ignoredEntries)
-        this.settings.ignoredEntries = {};
-      for (const path of legacyIgnored) {
-        if (typeof path === "string" && !this.settings.ignoredEntries[path]) {
-          this.settings.ignoredEntries[path] = { pending: true };
-        }
-      }
-    }
-    delete this.settings.ignoredPaths;
+    this.settings = normalizeSettings(data);
   }
   async saveSettings() {
     await this.saveData(this.settings);

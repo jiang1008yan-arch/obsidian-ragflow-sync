@@ -1,4 +1,4 @@
-import { App, parseYaml, TFile } from "obsidian";
+import { App } from "obsidian";
 import { RagflowClient } from "./ragflowClient";
 import { SyncStateStore } from "./syncState";
 import { sha256 } from "./hash";
@@ -8,14 +8,12 @@ import {
 	finalizeWithHashes,
 	markIgnored,
 } from "./diff";
-import { internalizeMarkdown, noteTitle } from "./internalize";
 import {
-	frontmatterLinkTargets,
-	normalizeMeta,
-	splitFrontmatter,
-	splitPartStem,
-} from "./frontmatter";
-import { normalizeTables } from "./tables";
+	applySyncRun,
+	PROCESSING_VERSION,
+	type ApplyResult,
+} from "./syncApplyRun";
+import { ObsidianVaultAccess, type VaultAccess } from "./vaultAccess";
 import {
 	ChangeKind,
 	DatasetMapping,
@@ -23,64 +21,19 @@ import {
 	FileChange,
 	IgnoreSnapshot,
 	RagflowSyncSettings,
-	RelatedLinks,
 	ScopeConfig,
-	SyncedFileRecord,
 	VaultEntry,
 } from "./types";
 
-/**
- * Version of the Markdown upload transform (frontmatter strip, metadata
- * wikilink cleaning, link internalization, table normalization). Bump this
- * whenever that processing changes so already-synced notes are re-uploaded on
- * the next scan even though their source content is unchanged. Records written
- * before versioning carry no version and so are treated as stale, forcing a
- * one-time re-sync.
- */
-export const PROCESSING_VERSION = 4;
-
-const CONTENT_TYPES: Record<string, string> = {
-	md: "text/markdown",
-	txt: "text/plain",
-	pdf: "application/pdf",
-	doc: "application/msword",
-	docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-	ppt: "application/vnd.ms-powerpoint",
-	pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-	xls: "application/vnd.ms-excel",
-	xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-	png: "image/png",
-	jpg: "image/jpeg",
-	jpeg: "image/jpeg",
-	gif: "image/gif",
-};
-
-export interface ApplyResult {
-	ok: number;
-	failed: number;
-	errors: string[];
-	/** Documents queued for parsing in RAGFlow (0 when auto-parse is off). */
-	parsed: number;
-}
-
-/**
- * Companion-metadata lookup for one apply run: source folder -> (linked-file
- * key -> that note's frontmatter). Built per run and passed down rather than
- * held as engine state, so concurrent runs cannot clobber one another.
- */
-type CompanionIndex = Map<string, Map<string, Record<string, unknown>>>;
-
-/** State written at most once per this many processed files during a sync. */
-const FLUSH_EVERY = 25;
+export { PROCESSING_VERSION, type ApplyResult } from "./syncApplyRun";
 
 /**
  * Orchestrates the sync: builds the vault snapshot, drives the pure Diff,
- * performs the hashing/persistence IO, and applies changes to RAGFlow. The
- * classification rules themselves live in ./diff (pure, synchronous, tested
- * through an in-memory snapshot).
+ * performs the hashing/persistence IO, and delegates Sync apply runs to
+ * syncApplyRun. The classification rules themselves live in ./diff.
  */
 export class SyncEngine {
-	private app: App;
+	private vault: VaultAccess;
 	private client: RagflowClient;
 	private store: SyncStateStore;
 	private getSettings: () => RagflowSyncSettings;
@@ -89,9 +42,10 @@ export class SyncEngine {
 		app: App,
 		client: RagflowClient,
 		store: SyncStateStore,
-		getSettings: () => RagflowSyncSettings
+		getSettings: () => RagflowSyncSettings,
+		vault: VaultAccess = new ObsidianVaultAccess(app)
 	) {
-		this.app = app;
+		this.vault = vault;
 		this.client = client;
 		this.store = store;
 		this.getSettings = getSettings;
@@ -109,23 +63,17 @@ export class SyncEngine {
 
 	/** Obsidian adapter for the vault-snapshot seam: every file, unfiltered. */
 	private buildSnapshot(): VaultEntry[] {
-		return this.app.vault.getFiles().map((f) => ({
-			path: f.path,
-			size: f.stat.size,
-			mtime: f.stat.mtime,
-		}));
+		return this.vault.listSnapshot();
 	}
 
 	private async hashPath(path: string): Promise<string> {
-		const bytes = await this.app.vault.adapter.readBinary(path);
+		const bytes = await this.vault.readBinary(path);
 		return sha256(bytes);
 	}
 
 	private missingMappings(): DatasetMapping[] {
 		return this.getSettings().datasetMappings.filter(
-			(m) =>
-				m.vaultPath.length > 0 &&
-				this.app.vault.getAbstractFileByPath(m.vaultPath) === null
+			(m) => m.vaultPath.length > 0 && !this.vault.folderExists(m.vaultPath)
 		);
 	}
 
@@ -146,9 +94,8 @@ export class SyncEngine {
 		}
 		const hashed = finalizeWithHashes(stat.needHash, hashes);
 
-		// Apply touch refreshes explicitly (no longer a hidden write inside the
-		// classification): identical content, drifted stats -> refresh to keep
-		// the next diff on the fast path. Mutated in memory, then persisted once.
+		// Identical content with drifted stats gets a Touch refresh so the next
+		// Diff can take the fast path without re-hashing.
 		for (const touch of hashed.touches) {
 			this.store.setFile(touch.vaultPath, {
 				...touch.record,
@@ -159,10 +106,8 @@ export class SyncEngine {
 
 		const changes = assembleChanges(stat, hashed);
 
-		// Snooze pass: flag ignored entries that still match their snapshot and
-		// re-surface (drop) those that have drifted, hashing only the ignored
-		// files stats alone can't settle. Snapshot writes/drops are persisted with
-		// the touch refreshes in the single flush below.
+		// Ignore (snooze) is applied after Diff: still-classified changes are
+		// flagged while their ignore snapshot matches, and re-surfaced when stale.
 		const snoozeHashes = await this.snoozeHashes(
 			changes,
 			settings.ignoredEntries
@@ -182,11 +127,8 @@ export class SyncEngine {
 	}
 
 	/**
-	 * Current content hashes for the ignored files whose snooze decision stats
-	 * alone cannot make: a `pending` (un-snapshotted) ignore, or a snapshot whose
-	 * size/mtime no longer match the file. Files already carrying a hash on their
-	 * change, deleted files, and stat-matched fast paths are skipped. Read
-	 * failures are left unset (markIgnored then re-surfaces that entry).
+	 * Current content hashes for ignored files whose snooze decision cannot be
+	 * made from stats alone.
 	 */
 	private async snoozeHashes(
 		changes: FileChange[],
@@ -215,413 +157,30 @@ export class SyncEngine {
 	}
 
 	/**
-	 * Snapshot a path for the ignore list at the moment the user ignores it:
-	 * `{deleted:true}` if it is gone from the vault, otherwise its current hash and
-	 * stats. Used by the panel's "Ignore selected" so an ignore takes effect
-	 * without waiting for the next scan.
+	 * Snapshot a path for Ignore (snooze) at the moment the user ignores it:
+	 * `{deleted:true}` if it is gone from the vault, otherwise its current hash
+	 * and stats.
 	 */
 	async snapshotForIgnore(path: string): Promise<IgnoreSnapshot> {
-		const file = this.app.vault.getAbstractFileByPath(path);
-		if (!(file instanceof TFile)) return { deleted: true };
+		const file = this.vault.getFile(path);
+		if (!file) return { deleted: true };
 		const hash = await this.hashPath(path);
 		return { hash, size: file.stat.size, mtime: file.stat.mtime };
-	}
-
-	private async datasetIdFor(change: FileChange): Promise<string> {
-		if (!change.mapping) {
-			throw new Error("Cannot place a file without an owning mapping.");
-		}
-		return this.client.ensureDatasetId(change.mapping.datasetName);
 	}
 
 	async applyChanges(
 		changes: FileChange[],
 		onProgress?: (done: number, total: number, label: string) => void
 	): Promise<ApplyResult> {
-		const actionable = changes.filter((c) => c.kind !== "unchanged");
-		let done = 0;
-		const result: ApplyResult = { ok: 0, failed: 0, errors: [], parsed: 0 };
-
-		// Document ids uploaded this run, grouped by dataset, so a single parse
-		// request per dataset can kick them all off once the uploads finish.
-		const uploaded = new Map<string, string[]>();
-
-		const companionIndex = await this.buildCompanionIndex();
-		let sinceFlush = 0;
-		try {
-			for (const change of actionable) {
-				try {
-					if (change.kind === "new") {
-						const up = await this.syncUpload(change, undefined, companionIndex);
-						this.recordUpload(uploaded, up);
-					} else if (change.kind === "modified") {
-						const up = await this.syncUpload(
-							change,
-							change.record,
-							companionIndex
-						);
-						this.recordUpload(uploaded, up);
-					} else if (change.kind === "deleted") {
-						if (change.record) {
-							// The document — or the whole dataset — may already be gone
-							// from RAGFlow (deleted there directly). That is the end state
-							// we want, so swallow the error and still drop the local record;
-							// otherwise the record survives and the deletion re-appears on
-							// every scan as an un-clearable phantom.
-							try {
-								await this.client.deleteDocuments(change.record.datasetId, [
-									change.record.documentId,
-								]);
-							} catch (e) {
-								console.warn(
-									`RAGFlow Sync: delete of ${change.vaultPath} failed ` +
-										`(treating as already gone): ${(e as Error).message}`
-								);
-							}
-						}
-						this.store.deleteFile(change.vaultPath);
-					}
-					result.ok += 1;
-				} catch (e) {
-					result.failed += 1;
-					result.errors.push(`${change.vaultPath}: ${(e as Error).message}`);
-				}
-				done += 1;
-				// Persist periodically so a crash mid-sync cannot leave a document
-				// uploaded to RAGFlow without a local record (which would re-upload
-				// it as a duplicate next run); the finally below persists the rest.
-				if (++sinceFlush >= FLUSH_EVERY) {
-					await this.store.flush();
-					sinceFlush = 0;
-				}
-				onProgress?.(done, actionable.length, change.vaultPath);
-			}
-		} finally {
-			await this.store.flush();
-		}
-
-		// Auto-parse: hand the freshly uploaded documents to RAGFlow for parsing
-		// with each dataset's configured chunking method. A parse failure is
-		// reported but does not undo the upload — the documents are in RAGFlow and
-		// can be parsed manually.
-		if (this.getSettings().autoParse) {
-			for (const [datasetId, ids] of uploaded) {
-				onProgress?.(done, actionable.length, `Parsing ${ids.length} document(s)…`);
-				try {
-					await this.client.parseDocuments(datasetId, ids);
-					result.parsed += ids.length;
-				} catch (e) {
-					result.errors.push(
-						`parse (dataset ${datasetId}): ${(e as Error).message}`
-					);
-				}
-			}
-		}
-
-		return result;
-	}
-
-	/** Group an uploaded document id under its dataset for the parse step. */
-	private recordUpload(
-		uploaded: Map<string, string[]>,
-		up: { datasetId: string; documentId: string }
-	): void {
-		const ids = uploaded.get(up.datasetId);
-		if (ids) ids.push(up.documentId);
-		else uploaded.set(up.datasetId, [up.documentId]);
-	}
-
-	private async syncUpload(
-		change: FileChange,
-		oldRecord: SyncedFileRecord | undefined,
-		companionIndex: CompanionIndex
-	): Promise<{ datasetId: string; documentId: string }> {
-		const file = this.app.vault.getAbstractFileByPath(change.vaultPath);
-		if (!(file instanceof TFile)) {
-			throw new Error("File no longer exists in vault.");
-		}
-		const bytes = await this.app.vault.adapter.readBinary(file.path);
-		const hash = change.hash ?? (await sha256(bytes));
-		const datasetId = await this.datasetIdFor(change);
-
-		if (oldRecord) {
-			// RAGFlow has no in-place replace: delete then re-upload.
-			try {
-				await this.client.deleteDocuments(oldRecord.datasetId, [
-					oldRecord.documentId,
-				]);
-			} catch (_e) {
-				// Old document may already be gone; continue with upload.
-			}
-		}
-
-		// Name-based replace: RAGFlow auto-suffixes a same-named upload (notes.md
-		// -> notes(1).md) instead of replacing it. The id-based delete above misses
-		// any copy we don't have a record for — a file synced before local state
-		// was lost, or earlier accumulated "(n)" duplicates. Clear every colliding
-		// name in the target dataset first so this upload lands clean. Best-effort:
-		// a lookup/delete failure must not block the upload.
-		try {
-			const dupes = await this.client.findDuplicateDocumentIds(
-				datasetId,
-				file.name
-			);
-			if (dupes.length > 0) {
-				await this.client.deleteDocuments(datasetId, dupes);
-			}
-		} catch (e) {
-			console.warn(
-				`RAGFlow Sync: could not clear duplicates of ${file.name} before ` +
-					`upload: ${(e as Error).message}`
-			);
-		}
-
-		// Change detection always hashes the raw source above; the Markdown
-		// transform (frontmatter strip + optional link internalization) only
-		// rewrites the bytes we hand to RAGFlow — the vault file is untouched.
-		const prepared =
-			file.extension.toLowerCase() === "md"
-				? this.prepareMarkdown(bytes, file.path)
-				: { uploadBytes: bytes, meta: {} as Record<string, unknown> };
-		const uploadBytes = prepared.uploadBytes;
-		let meta = prepared.meta;
-
-		// Companion metadata: a file with no metadata of its own — chiefly an
-		// attachment like a PDF — inherits the frontmatter of a note in the
-		// mapping's source folder that links to it. Files that already carry their
-		// own metadata, and files no source note links to, are left as-is.
-		const sourceFolder = change.mapping?.companionSourceFolder;
-		if (Object.keys(meta).length === 0 && sourceFolder) {
-			const found = this.lookupCompanion(companionIndex, sourceFolder, file);
-			if (found) {
-				meta = found;
-			} else {
-				console.warn(
-					`RAGFlow Sync: no companion metadata for ${change.vaultPath} — ` +
-						`no note in "${sourceFolder}" has a frontmatter link to it, ` +
-						`so the document is uploaded without metadata.`
-				);
-			}
-		}
-
-		const contentType = CONTENT_TYPES[file.extension.toLowerCase()];
-		const doc = await this.client.uploadDocument(
-			datasetId,
-			file.name,
-			uploadBytes,
-			contentType
-		);
-
-		// Set the note's frontmatter as RAGFlow document metadata. The upload is
-		// kept either way, but a metadata failure marks the record metaPending so
-		// the next scan retries it, and is reported as this file's failure.
-		let metaError: Error | null = null;
-		if (Object.keys(meta).length > 0) {
-			try {
-				await this.client.setDocumentMetadata(datasetId, doc.id, meta);
-			} catch (e) {
-				metaError = e as Error;
-				console.error(
-					`RAGFlow Sync: failed to set metadata for ${change.vaultPath}:`,
-					e,
-					"\nmeta_fields sent:",
-					JSON.stringify(meta)
-				);
-			}
-		}
-
-		this.store.setFile(change.vaultPath, {
-			documentId: doc.id,
-			datasetId,
-			hash,
-			size: file.stat.size,
-			mtime: file.stat.mtime,
-			lastSyncedAt: Date.now(),
+		return applySyncRun({
+			vault: this.vault,
+			client: this.client,
+			store: this.store,
+			settings: this.getSettings(),
+			changes,
+			onProgress,
 			processingVersion: PROCESSING_VERSION,
-			...(metaError ? { metaPending: true } : {}),
 		});
-
-		// Manually uploading a snoozed file clears its ignore: it is now up to
-		// date, so the snapshot is moot and it should track changes normally again.
-		delete this.getSettings().ignoredEntries[change.vaultPath];
-
-		if (metaError) {
-			throw new Error(
-				`uploaded, but setting metadata failed: ${metaError.message} ` +
-					`(document kept; metadata will be retried on the next scan)`
-			);
-		}
-
-		return { datasetId, documentId: doc.id };
-	}
-
-	/**
-	 * Decode a Markdown file, strip its YAML frontmatter (parsed out as metadata),
-	 * optionally internalize its links and convert its tables to HTML, then
-	 * re-encode the body as UTF-8. The frontmatter becomes the document's RAGFlow
-	 * metadata rather than living in the uploaded text.
-	 */
-	private prepareMarkdown(
-		bytes: ArrayBuffer,
-		path: string
-	): { uploadBytes: ArrayBuffer; meta: Record<string, unknown> } {
-		const text = new TextDecoder().decode(bytes);
-		const { yaml, body } = splitFrontmatter(text);
-
-		let meta: Record<string, unknown> = {};
-		if (yaml !== null) {
-			try {
-				meta = normalizeMeta(parseYaml(yaml));
-			} catch (e) {
-				console.error(`RAGFlow Sync: invalid frontmatter in ${path}:`, e);
-			}
-		}
-
-		const settings = this.getSettings();
-		let transformed = settings.internalizeLinks
-			? internalizeMarkdown(body, this.relatedLinks(path))
-			: body;
-		if (settings.normalizeTables) {
-			transformed = normalizeTables(transformed);
-		}
-		return {
-			uploadBytes: new TextEncoder().encode(transformed).buffer,
-			meta,
-		};
-	}
-
-	/**
-	 * Build the companion-metadata lookup for this apply run. For each distinct
-	 * source folder configured on a mapping, scan that folder's notes; whenever a
-	 * note's frontmatter links to a file (e.g. `file: "[[report.pdf]]"`), record
-	 * that the linked file inherits the note's normalized frontmatter. Keyed by
-	 * source folder so an attachment only matches notes from its own mapping's
-	 * folder. The link target is read straight from the frontmatter text and
-	 * indexed under several keys (see indexCompanionTarget) so resolution survives
-	 * a link that carries an extension, omits one, or does not resolve uniquely.
-	 */
-	private async buildCompanionIndex(): Promise<CompanionIndex> {
-		const index: CompanionIndex = new Map();
-		const folders = new Set(
-			this.getSettings()
-				.datasetMappings.map((m) => m.companionSourceFolder)
-				.filter((f): f is string => !!f && f.length > 0)
-		);
-
-		for (const folder of folders) {
-			const map = new Map<string, Record<string, unknown>>();
-			const prefix = `${folder}/`;
-			const notes = this.app.vault
-				.getMarkdownFiles()
-				.filter((f) => f.path === folder || f.path.startsWith(prefix));
-
-			for (const note of notes) {
-				// The metadata cache may not have indexed a note yet (e.g. a sync
-				// right after the vault opens); fall back to parsing the note's
-				// frontmatter from disk so the whole batch doesn't lose metadata.
-				const fm =
-					this.app.metadataCache.getFileCache(note)?.frontmatter ??
-					(await this.readFrontmatter(note));
-				if (!fm) continue;
-				const targets = frontmatterLinkTargets(fm);
-				if (targets.length === 0) continue;
-				const meta = normalizeMeta(fm);
-				for (const target of targets) {
-					this.indexCompanionTarget(map, note, target, meta);
-				}
-			}
-			index.set(folder, map);
-		}
-		return index;
-	}
-
-	/** Parse a note's frontmatter straight from disk; undefined when absent/invalid. */
-	private async readFrontmatter(
-		note: TFile
-	): Promise<Record<string, unknown> | undefined> {
-		try {
-			const text = await this.app.vault.cachedRead(note);
-			const { yaml } = splitFrontmatter(text);
-			if (yaml === null) return undefined;
-			const parsed = parseYaml(yaml);
-			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-				return parsed as Record<string, unknown>;
-			}
-			return undefined;
-		} catch (_e) {
-			return undefined;
-		}
-	}
-
-	/**
-	 * Record a companion match under every key a later upload might look it up by,
-	 * so a link survives whether or not it carries an extension and whether or not
-	 * it resolves to a unique vault path: the resolved path (when Obsidian can
-	 * resolve it), plus the link's file name and its extension-less base, both
-	 * lower-cased and prefixed so the key spaces never collide.
-	 */
-	private indexCompanionTarget(
-		map: Map<string, Record<string, unknown>>,
-		note: TFile,
-		linkpath: string,
-		meta: Record<string, unknown>
-	): void {
-		const dest = this.app.metadataCache.getFirstLinkpathDest(
-			linkpath,
-			note.path
-		);
-		if (dest) map.set(dest.path, meta);
-
-		const name = (linkpath.split("/").pop() ?? linkpath).trim();
-		if (!name) return;
-		map.set(`name:${name.toLowerCase()}`, meta);
-		const dot = name.lastIndexOf(".");
-		const base = dot > 0 ? name.slice(0, dot) : name;
-		map.set(`base:${base.toLowerCase()}`, meta);
-	}
-
-	/**
-	 * A file's companion metadata: by resolved path, then file name, then base.
-	 * As a last resort, a split part named `<stem>_p<start>-<end>` falls back to
-	 * its stem, so an oversized document carved into page-range parts can share a
-	 * single source note that links to the whole document.
-	 */
-	private lookupCompanion(
-		companionIndex: CompanionIndex,
-		sourceFolder: string,
-		file: TFile
-	): Record<string, unknown> | undefined {
-		const map = companionIndex.get(sourceFolder);
-		if (!map) return undefined;
-		const direct =
-			map.get(file.path) ??
-			map.get(`name:${file.name.toLowerCase()}`) ??
-			map.get(`base:${file.basename.toLowerCase()}`);
-		if (direct) return direct;
-		const stem = splitPartStem(file.basename);
-		return stem ? map.get(`base:${stem.toLowerCase()}`) : undefined;
-	}
-
-	/**
-	 * Outgoing links and backlinks for a note, as titles, from Obsidian's
-	 * resolved-link graph. Only note-to-note (.md) relationships are listed;
-	 * attachments and unresolved links are ignored.
-	 */
-	private relatedLinks(path: string): RelatedLinks {
-		const resolved = this.app.metadataCache.resolvedLinks ?? {};
-		const isNote = (p: string) => p.toLowerCase().endsWith(".md");
-
-		const outgoing = Object.keys(resolved[path] ?? {})
-			.filter((target) => target !== path && isNote(target))
-			.map(noteTitle);
-
-		const incoming: string[] = [];
-		for (const [source, targets] of Object.entries(resolved)) {
-			if (source !== path && isNote(source) && targets[path]) {
-				incoming.push(noteTitle(source));
-			}
-		}
-		return { outgoing, incoming };
 	}
 }
 

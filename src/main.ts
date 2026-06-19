@@ -1,10 +1,11 @@
 import { Notice, Plugin, WorkspaceLeaf } from "obsidian";
-import { DEFAULT_SETTINGS, RagflowSyncSettingTab } from "./settings";
+import { RagflowSyncSettingTab } from "./settings";
+import { normalizeSettings } from "./settingsMigration";
 import { RagflowClient } from "./ragflowClient";
 import { SyncStateStore } from "./syncState";
 import { SyncEngine } from "./syncEngine";
 import { RagflowSyncView, VIEW_TYPE_RAGFLOW_SYNC } from "./statusView";
-import { DatasetMapping, RagflowSyncSettings } from "./types";
+import { RagflowSyncSettings } from "./types";
 
 export default class RagflowSyncPlugin extends Plugin {
 	settings!: RagflowSyncSettings;
@@ -103,63 +104,7 @@ export default class RagflowSyncPlugin extends Plugin {
 
 	async loadSettings(): Promise<void> {
 		const data = (await this.loadData()) ?? {};
-		this.settings = Object.assign({}, DEFAULT_SETTINGS, data);
-		// Ensure nested state object exists and is well-formed.
-		this.settings.state = Object.assign({ files: {} }, data.state ?? {});
-		this.migrateLegacyData(data);
-	}
-
-	/**
-	 * Migrate data.json written by the File-Management era of the plugin:
-	 * `folderMappings` (vault folder -> RAGFlow folder path) become
-	 * `datasetMappings` (vault folder -> dataset name), and any synced records
-	 * still keyed to File-Management files are dropped so everything re-syncs
-	 * into datasets on the next run.
-	 */
-	private migrateLegacyData(data: Record<string, unknown>): void {
-		const legacyMappings = data.folderMappings as
-			| { vaultPath?: string; ragflowBaseFolder?: string }[]
-			| undefined;
-		if (legacyMappings && this.settings.datasetMappings.length === 0) {
-			this.settings.datasetMappings = legacyMappings.map((m) => ({
-				vaultPath: m.vaultPath ?? "",
-				datasetName: m.ragflowBaseFolder ?? "",
-			}));
-		}
-		delete (this.settings as unknown as Record<string, unknown>).folderMappings;
-		// Drop fields from earlier companion-metadata designs (a per-mapping flag,
-		// then a separate path list); companion metadata is now a per-mapping
-		// source folder, so these no longer carry meaning.
-		delete (this.settings as unknown as Record<string, unknown>)
-			.companionMetadataPaths;
-		for (const mapping of this.settings.datasetMappings as Array<
-			DatasetMapping & { companionMetadata?: boolean }
-		>) {
-			delete mapping.companionMetadata;
-		}
-
-		const files = this.settings.state.files;
-		const isLegacyRecord = Object.values(files).some(
-			(r) => (r as { documentId?: string }).documentId === undefined
-		);
-		if (isLegacyRecord) {
-			this.settings.state.files = {};
-		}
-
-		// Migrate the legacy `ignoredPaths: string[]` freeze list into the
-		// snapshot-keyed `ignoredEntries` map. Old entries carried no snapshot, so
-		// each becomes `pending` and the engine captures the real snapshot on the
-		// next scan (or marks it deleted if the file is already gone).
-		const legacyIgnored = (data as { ignoredPaths?: unknown }).ignoredPaths;
-		if (Array.isArray(legacyIgnored)) {
-			if (!this.settings.ignoredEntries) this.settings.ignoredEntries = {};
-			for (const path of legacyIgnored) {
-				if (typeof path === "string" && !this.settings.ignoredEntries[path]) {
-					this.settings.ignoredEntries[path] = { pending: true };
-				}
-			}
-		}
-		delete (this.settings as unknown as Record<string, unknown>).ignoredPaths;
+		this.settings = normalizeSettings(data);
 	}
 
 	async saveSettings(): Promise<void> {
