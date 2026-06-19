@@ -1307,17 +1307,12 @@ var SyncApplyRun = class {
     );
     let metaError = null;
     if (Object.keys(meta).length > 0) {
-      try {
-        await this.client.setDocumentMetadata(datasetId, doc.id, meta);
-      } catch (e) {
-        metaError = e;
-        console.error(
-          `RAGFlow Sync: failed to set metadata for ${change.vaultPath}:`,
-          e,
-          "\nmeta_fields sent:",
-          JSON.stringify(meta)
-        );
-      }
+      metaError = await this.setDocumentMetadataBestEffort(
+        datasetId,
+        doc.id,
+        change.vaultPath,
+        meta
+      );
     }
     this.store.setFile(change.vaultPath, {
       documentId: doc.id,
@@ -1339,6 +1334,48 @@ var SyncApplyRun = class {
         )
       } : {}
     };
+  }
+  async setDocumentMetadataBestEffort(datasetId, documentId, vaultPath, meta) {
+    try {
+      await this.client.setDocumentMetadata(datasetId, documentId, meta);
+      return null;
+    } catch (e) {
+      const batchError = e;
+      console.warn(
+        `RAGFlow Sync: metadata update for ${vaultPath} failed as a batch; retrying field by field:`,
+        batchError,
+        "\nmeta_fields sent:",
+        JSON.stringify(meta)
+      );
+      const accepted = {};
+      for (const [key, value] of Object.entries(meta)) {
+        const candidate = { ...accepted, [key]: value };
+        try {
+          await this.client.setDocumentMetadata(
+            datasetId,
+            documentId,
+            candidate
+          );
+          accepted[key] = value;
+        } catch (fieldError) {
+          console.warn(
+            `RAGFlow Sync: dropped metadata field "${key}" for ${vaultPath}: ${fieldError.message}`,
+            "\nfield sent:",
+            JSON.stringify({ [key]: value })
+          );
+        }
+      }
+      if (Object.keys(accepted).length > 0) {
+        return null;
+      }
+      console.error(
+        `RAGFlow Sync: failed to set metadata for ${vaultPath}:`,
+        batchError,
+        "\nmeta_fields sent:",
+        JSON.stringify(meta)
+      );
+      return batchError;
+    }
   }
   async clearDuplicateDocuments(datasetId, name) {
     try {

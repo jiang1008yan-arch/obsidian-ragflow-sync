@@ -113,6 +113,7 @@ describe("applySyncRun deletion", () => {
 describe("applySyncRun upload", () => {
 	beforeEach(() => {
 		vi.spyOn(console, "error").mockImplementation(() => {});
+		vi.spyOn(console, "warn").mockImplementation(() => {});
 	});
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -182,6 +183,95 @@ describe("applySyncRun upload", () => {
 		expect(store.getFile(pdf.path)?.metaPending).toBe(true);
 		expect(parseDocuments).toHaveBeenCalledWith("ds1", ["doc1"]);
 		expect(result.failed).toBe(1);
+		expect(result.parsed).toBe(1);
+	});
+
+	it("keeps accepted metadata fields when one field makes the full update fail", async () => {
+		const mapping: DatasetMapping = {
+			vaultPath: "Docs",
+			datasetName: "Knowledge",
+			companionSourceFolder: "Meta",
+		};
+		const pdf = file("Docs/report.pdf", "report.pdf", "pdf", "report");
+		const metaNote = file("Meta/report.md", "report.md", "md", "report");
+		const s = settings({
+			datasetMappings: [mapping],
+			extensions: ["pdf"],
+			autoParse: true,
+		});
+		const store = new SyncStateStore(s.state, async () => {});
+		const parseDocuments = vi.fn().mockResolvedValue(undefined);
+		const setDocumentMetadata = vi
+			.fn()
+			.mockRejectedValueOnce(new Error("Failed to update metadata"))
+			.mockResolvedValueOnce(undefined)
+			.mockResolvedValueOnce(undefined)
+			.mockRejectedValueOnce(new Error("Failed to update metadata"));
+		const client = {
+			ensureDatasetId: vi.fn().mockResolvedValue("ds1"),
+			findDuplicateDocumentIds: vi.fn().mockResolvedValue([]),
+			uploadDocument: vi.fn().mockResolvedValue({ id: "doc1", name: "report.md" }),
+			setDocumentMetadata,
+			parseDocuments,
+		} as unknown as RagflowClient;
+		const vault = emptyVault({
+			getFile: vi.fn((path: string) =>
+				path === pdf.path ? (pdf as VaultFile) : undefined
+			),
+			readBinary: vi
+				.fn()
+				.mockResolvedValue(new TextEncoder().encode("pdf-body").buffer),
+			markdownFilesUnder: vi.fn(() => [metaNote as VaultFile]),
+			frontmatter: vi.fn((note: VaultFile) =>
+				note.path === metaNote.path
+					? {
+							file: "[[report.pdf]]",
+							country: "美国",
+							modified: "2026-06-",
+						}
+					: undefined
+			),
+			resolveLink: vi.fn((linkpath: string) =>
+				linkpath === "report.pdf" ? (pdf as VaultFile) : undefined
+			),
+		});
+		const change: FileChange = {
+			kind: "new",
+			vaultPath: pdf.path,
+			mapping,
+			hash: "hash",
+			size: pdf.stat.size,
+			mtime: pdf.stat.mtime,
+		};
+
+		const result = await applySyncRun({
+			vault,
+			client,
+			store,
+			settings: s,
+			changes: [change],
+		});
+
+		expect(setDocumentMetadata).toHaveBeenNthCalledWith(1, "ds1", "doc1", {
+			file: "report.pdf",
+			country: "美国",
+			modified: "2026-06-",
+		});
+		expect(setDocumentMetadata).toHaveBeenNthCalledWith(2, "ds1", "doc1", {
+			file: "report.pdf",
+		});
+		expect(setDocumentMetadata).toHaveBeenNthCalledWith(3, "ds1", "doc1", {
+			file: "report.pdf",
+			country: "美国",
+		});
+		expect(setDocumentMetadata).toHaveBeenNthCalledWith(4, "ds1", "doc1", {
+			file: "report.pdf",
+			country: "美国",
+			modified: "2026-06-",
+		});
+		expect(store.getFile(pdf.path)?.metaPending).toBeUndefined();
+		expect(parseDocuments).toHaveBeenCalledWith("ds1", ["doc1"]);
+		expect(result.failed).toBe(0);
 		expect(result.parsed).toBe(1);
 	});
 });
