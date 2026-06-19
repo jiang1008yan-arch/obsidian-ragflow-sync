@@ -239,17 +239,12 @@ class SyncApplyRun {
 
 		let metaError: Error | null = null;
 		if (Object.keys(meta).length > 0) {
-			try {
-				await this.client.setDocumentMetadata(datasetId, doc.id, meta);
-			} catch (e) {
-				metaError = e as Error;
-				console.error(
-					`RAGFlow Sync: failed to set metadata for ${change.vaultPath}:`,
-					e,
-					"\nmeta_fields sent:",
-					JSON.stringify(meta)
-				);
-			}
+			metaError = await this.setDocumentMetadataBestEffort(
+				datasetId,
+				doc.id,
+				change.vaultPath,
+				meta
+			);
 		}
 
 		this.store.setFile(change.vaultPath, {
@@ -277,6 +272,59 @@ class SyncApplyRun {
 					}
 				: {}),
 		};
+	}
+
+	private async setDocumentMetadataBestEffort(
+		datasetId: string,
+		documentId: string,
+		vaultPath: string,
+		meta: Record<string, unknown>
+	): Promise<Error | null> {
+		try {
+			await this.client.setDocumentMetadata(datasetId, documentId, meta);
+			return null;
+		} catch (e) {
+			const batchError = e as Error;
+			console.warn(
+				`RAGFlow Sync: metadata update for ${vaultPath} failed as a batch; ` +
+					`retrying field by field:`,
+				batchError,
+				"\nmeta_fields sent:",
+				JSON.stringify(meta)
+			);
+
+			const accepted: Record<string, unknown> = {};
+			for (const [key, value] of Object.entries(meta)) {
+				const candidate = { ...accepted, [key]: value };
+				try {
+					await this.client.setDocumentMetadata(
+						datasetId,
+						documentId,
+						candidate
+					);
+					accepted[key] = value;
+				} catch (fieldError) {
+					console.warn(
+						`RAGFlow Sync: dropped metadata field "${key}" for ` +
+							`${vaultPath}: ${(fieldError as Error).message}`,
+						"\nfield sent:",
+						JSON.stringify({ [key]: value })
+					);
+				}
+			}
+
+			if (Object.keys(accepted).length > 0) {
+				return null;
+			}
+
+			console.error(
+				`RAGFlow Sync: failed to set metadata for ${vaultPath}:`,
+				batchError,
+				"\nmeta_fields sent:",
+				JSON.stringify(meta)
+			);
+			return batchError;
+		}
 	}
 
 	private async clearDuplicateDocuments(

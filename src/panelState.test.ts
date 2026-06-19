@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
 	forceAllChanges,
 	forceSelectedChanges,
+	syncSelectedChanges,
 	syncAllChanges,
 	tabData,
 } from "./panelState";
@@ -42,6 +43,14 @@ describe("panel state", () => {
 		expect(syncAllChanges(changes).map((c) => c.vaultPath)).toEqual([
 			"new.md",
 			"gone.md",
+		]);
+	});
+
+	it("sync selected applies only checked Scan-diff-visible changes", () => {
+		const selected = new Set(["new.md", "same.md", "ignored.md"]);
+
+		expect(syncSelectedChanges(changes, selected).map((c) => c.vaultPath)).toEqual([
+			"new.md",
 		]);
 	});
 

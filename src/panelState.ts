@@ -13,6 +13,13 @@ export function syncAllChanges(changes: FileChange[]): FileChange[] {
 	return changes.filter((c) => !c.ignored && c.kind !== "unchanged");
 }
 
+export function syncSelectedChanges(
+	changes: FileChange[],
+	selected: Set<string>
+): FileChange[] {
+	return syncAllChanges(changes).filter((c) => selected.has(c.vaultPath));
+}
+
 export function forceSelectedChanges(
 	changes: FileChange[],
 	selected: Set<string>
