@@ -145,6 +145,21 @@ export default class RagflowSyncPlugin extends Plugin {
 		if (isLegacyRecord) {
 			this.settings.state.files = {};
 		}
+
+		// Migrate the legacy `ignoredPaths: string[]` freeze list into the
+		// snapshot-keyed `ignoredEntries` map. Old entries carried no snapshot, so
+		// each becomes `pending` and the engine captures the real snapshot on the
+		// next scan (or marks it deleted if the file is already gone).
+		const legacyIgnored = (data as { ignoredPaths?: unknown }).ignoredPaths;
+		if (Array.isArray(legacyIgnored)) {
+			if (!this.settings.ignoredEntries) this.settings.ignoredEntries = {};
+			for (const path of legacyIgnored) {
+				if (typeof path === "string" && !this.settings.ignoredEntries[path]) {
+					this.settings.ignoredEntries[path] = { pending: true };
+				}
+			}
+		}
+		delete (this.settings as unknown as Record<string, unknown>).ignoredPaths;
 	}
 
 	async saveSettings(): Promise<void> {

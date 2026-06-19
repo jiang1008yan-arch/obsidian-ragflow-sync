@@ -2,7 +2,12 @@ import { App, parseYaml, TFile } from "obsidian";
 import { RagflowClient } from "./ragflowClient";
 import { SyncStateStore } from "./syncState";
 import { sha256 } from "./hash";
-import { assembleChanges, classifyByStat, finalizeWithHashes } from "./diff";
+import {
+	assembleChanges,
+	classifyByStat,
+	finalizeWithHashes,
+	markIgnored,
+} from "./diff";
 import { internalizeMarkdown, noteTitle } from "./internalize";
 import {
 	frontmatterLinkTargets,
@@ -16,6 +21,7 @@ import {
 	DatasetMapping,
 	DiffResult,
 	FileChange,
+	IgnoreSnapshot,
 	RagflowSyncSettings,
 	RelatedLinks,
 	ScopeConfig,
@@ -97,7 +103,6 @@ export class SyncEngine {
 			mappings: s.datasetMappings,
 			extensions: s.extensions,
 			excludeGlobs: s.excludeGlobs,
-			ignored: new Set(s.ignoredPaths),
 			processingVersion: PROCESSING_VERSION,
 		};
 	}
@@ -125,7 +130,8 @@ export class SyncEngine {
 	}
 
 	async computeDiff(): Promise<DiffResult> {
-		const state = this.getSettings().state;
+		const settings = this.getSettings();
+		const state = settings.state;
 		const scope = this.scope();
 
 		const stat = classifyByStat(this.buildSnapshot(), state, scope);
@@ -150,12 +156,75 @@ export class SyncEngine {
 				mtime: touch.mtime,
 			});
 		}
+
+		const changes = assembleChanges(stat, hashed);
+
+		// Snooze pass: flag ignored entries that still match their snapshot and
+		// re-surface (drop) those that have drifted, hashing only the ignored
+		// files stats alone can't settle. Snapshot writes/drops are persisted with
+		// the touch refreshes in the single flush below.
+		const snoozeHashes = await this.snoozeHashes(
+			changes,
+			settings.ignoredEntries
+		);
+		const snooze = markIgnored(changes, settings.ignoredEntries, snoozeHashes);
+		for (const path of snooze.staleIgnores) delete settings.ignoredEntries[path];
+		for (const [path, snap] of Object.entries(snooze.captured)) {
+			settings.ignoredEntries[path] = snap;
+		}
+
 		await this.store.flush();
 
 		return {
-			changes: assembleChanges(stat, hashed),
+			changes: snooze.changes,
 			missingMappings: this.missingMappings(),
 		};
+	}
+
+	/**
+	 * Current content hashes for the ignored files whose snooze decision stats
+	 * alone cannot make: a `pending` (un-snapshotted) ignore, or a snapshot whose
+	 * size/mtime no longer match the file. Files already carrying a hash on their
+	 * change, deleted files, and stat-matched fast paths are skipped. Read
+	 * failures are left unset (markIgnored then re-surfaces that entry).
+	 */
+	private async snoozeHashes(
+		changes: FileChange[],
+		ignoredEntries: Record<string, IgnoreSnapshot>
+	): Promise<Map<string, string>> {
+		const out = new Map<string, string>();
+		for (const change of changes) {
+			const snap = ignoredEntries[change.vaultPath];
+			if (!snap || change.kind === "deleted" || change.hash !== undefined) {
+				continue;
+			}
+			const needs =
+				"pending" in snap
+					? true
+					: "deleted" in snap
+						? false
+						: !(change.size === snap.size && change.mtime === snap.mtime);
+			if (!needs) continue;
+			try {
+				out.set(change.vaultPath, await this.hashPath(change.vaultPath));
+			} catch (_e) {
+				// Leave unset.
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * Snapshot a path for the ignore list at the moment the user ignores it:
+	 * `{deleted:true}` if it is gone from the vault, otherwise its current hash and
+	 * stats. Used by the panel's "Ignore selected" so an ignore takes effect
+	 * without waiting for the next scan.
+	 */
+	async snapshotForIgnore(path: string): Promise<IgnoreSnapshot> {
+		const file = this.app.vault.getAbstractFileByPath(path);
+		if (!(file instanceof TFile)) return { deleted: true };
+		const hash = await this.hashPath(path);
+		return { hash, size: file.stat.size, mtime: file.stat.mtime };
 	}
 
 	private async datasetIdFor(change: FileChange): Promise<string> {
@@ -338,6 +407,10 @@ export class SyncEngine {
 			processingVersion: PROCESSING_VERSION,
 			...(metaError ? { metaPending: true } : {}),
 		});
+
+		// Manually uploading a snoozed file clears its ignore: it is now up to
+		// date, so the snapshot is moot and it should track changes normally again.
+		delete this.getSettings().ignoredEntries[change.vaultPath];
 
 		if (metaError) {
 			throw new Error(

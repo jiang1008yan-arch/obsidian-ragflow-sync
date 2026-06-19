@@ -1,7 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { assembleChanges, classifyByStat, finalizeWithHashes } from "./diff";
+import {
+	assembleChanges,
+	classifyByStat,
+	finalizeWithHashes,
+	markIgnored,
+} from "./diff";
 import {
 	DatasetMapping,
+	FileChange,
+	IgnoreSnapshot,
 	ScopeConfig,
 	SyncedFileRecord,
 	SyncState,
@@ -194,46 +201,98 @@ describe("classifyByStat", () => {
 		});
 	});
 
-	describe("ignore rule (freeze)", () => {
-		it("does not classify an ignored in-scope file as new", () => {
-			const r = classifyByStat(
-				[entry("Notes/a.md")],
-				state({}),
-				scope({ ignored: new Set(["Notes/a.md"]) })
-			);
-			expect(r.news).toHaveLength(0);
-			expect(r.needHash).toHaveLength(0);
-		});
+});
 
-		it("does not re-flag an ignored modified file", () => {
-			const r = classifyByStat(
-				[entry("Notes/a.md", 20, 200)],
-				state({ "Notes/a.md": record({ size: 10, mtime: 100 }) }),
-				scope({ ignored: new Set(["Notes/a.md"]) })
-			);
-			expect(r.needHash).toHaveLength(0);
-			expect(r.unchanged).toHaveLength(0);
-			expect(r.deletions).toHaveLength(0);
-		});
+describe("markIgnored (snooze)", () => {
+	const change = (over: Partial<FileChange> = {}): FileChange => ({
+		kind: "modified",
+		vaultPath: "Notes/a.md",
+		size: 10,
+		mtime: 100,
+		...over,
+	});
+	const ignores = (
+		snap: IgnoreSnapshot,
+		path = "Notes/a.md"
+	): Record<string, IgnoreSnapshot> => ({ [path]: snap });
 
-		it("keeps (does not delete) an already-synced file once ignored", () => {
-			const r = classifyByStat(
-				[entry("Notes/a.md", 10, 100)],
-				state({ "Notes/a.md": record({ size: 10, mtime: 100 }) }),
-				scope({ ignored: new Set(["Notes/a.md"]) })
-			);
-			expect(r.deletions).toHaveLength(0);
-			expect(r.unchanged).toHaveLength(0);
-		});
+	it("flags an ignored file whose stats still match the snapshot (fast path)", () => {
+		const c = change({ size: 10, mtime: 100 });
+		const r = markIgnored(
+			[c],
+			ignores({ hash: "h1", size: 10, mtime: 100 }),
+			new Map()
+		);
+		expect(c.ignored).toBe(true);
+		expect(r.staleIgnores).toHaveLength(0);
+		expect(r.captured).toEqual({});
+	});
 
-		it("does not delete an ignored synced file that is gone from the snapshot", () => {
-			const r = classifyByStat(
-				[],
-				state({ "Notes/a.md": record() }),
-				scope({ ignored: new Set(["Notes/a.md"]) })
-			);
-			expect(r.deletions).toHaveLength(0);
-		});
+	it("re-surfaces (drops) an ignored file whose content drifted", () => {
+		const c = change({ size: 20, mtime: 200, hash: "h2" });
+		const r = markIgnored([c], ignores({ hash: "h1", size: 10, mtime: 100 }), new Map());
+		expect(c.ignored).toBeFalsy();
+		expect(r.staleIgnores).toEqual(["Notes/a.md"]);
+	});
+
+	it("stays ignored via hash when stats drifted but content matches, refreshing the snapshot", () => {
+		const c = change({ size: 10, mtime: 999, hash: "h1" });
+		const r = markIgnored([c], ignores({ hash: "h1", size: 10, mtime: 100 }), new Map());
+		expect(c.ignored).toBe(true);
+		expect(r.captured["Notes/a.md"]).toEqual({ hash: "h1", size: 10, mtime: 999 });
+	});
+
+	it("uses currentHashes when the change carries no hash", () => {
+		const c = change({ kind: "unchanged", size: 10, mtime: 999, hash: undefined });
+		const r = markIgnored(
+			[c],
+			ignores({ hash: "h1", size: 10, mtime: 100 }),
+			new Map([["Notes/a.md", "h1"]])
+		);
+		expect(c.ignored).toBe(true);
+		expect(r.captured["Notes/a.md"]).toMatchObject({ hash: "h1", mtime: 999 });
+	});
+
+	it("keeps a deleted+ignored entry ignored while it stays gone", () => {
+		const c = change({ kind: "deleted", size: undefined, mtime: undefined });
+		const r = markIgnored([c], ignores({ deleted: true }), new Map());
+		expect(c.ignored).toBe(true);
+		expect(r.staleIgnores).toHaveLength(0);
+	});
+
+	it("drops a deleted-snapshot ignore when a file reappears at the path", () => {
+		const c = change({ kind: "new", size: 5, mtime: 50 });
+		const r = markIgnored([c], ignores({ deleted: true }), new Map());
+		expect(c.ignored).toBeFalsy();
+		expect(r.staleIgnores).toEqual(["Notes/a.md"]);
+	});
+
+	it("captures a pending (migrated) ignore into a real snapshot", () => {
+		const c = change({ kind: "new", size: 7, mtime: 70, hash: "hn" });
+		const r = markIgnored([c], ignores({ pending: true }), new Map());
+		expect(c.ignored).toBe(true);
+		expect(r.captured["Notes/a.md"]).toEqual({ hash: "hn", size: 7, mtime: 70 });
+	});
+
+	it("resolves a pending ignore for a gone file to a deleted snapshot", () => {
+		const c = change({ kind: "deleted", size: undefined, mtime: undefined });
+		const r = markIgnored([c], ignores({ pending: true }), new Map());
+		expect(c.ignored).toBe(true);
+		expect(r.captured["Notes/a.md"]).toEqual({ deleted: true });
+	});
+
+	it("re-surfaces a present-file snapshot once the file is deleted", () => {
+		const c = change({ kind: "deleted", size: undefined, mtime: undefined });
+		const r = markIgnored([c], ignores({ hash: "h1", size: 10, mtime: 100 }), new Map());
+		expect(c.ignored).toBeFalsy();
+		expect(r.staleIgnores).toEqual(["Notes/a.md"]);
+	});
+
+	it("leaves unrelated changes untouched", () => {
+		const c = change({ vaultPath: "Notes/b.md" });
+		const r = markIgnored([c], ignores({ deleted: true }, "Notes/a.md"), new Map());
+		expect(c.ignored).toBeFalsy();
+		expect(r.staleIgnores).toHaveLength(0);
 	});
 });
 

@@ -1,8 +1,10 @@
 import {
 	FileChange,
 	HashClassification,
+	IgnoreSnapshot,
 	PendingHash,
 	ScopeConfig,
+	SnoozeResult,
 	StatClassification,
 	SyncState,
 	VaultEntry,
@@ -35,10 +37,6 @@ export function classifyByStat(
 	const inScopePaths = new Set<string>();
 
 	for (const entry of snapshot) {
-		// Ignored: frozen. Skip classification so it is never uploaded, and leave
-		// it out of inScopePaths — the deletion loop below also skips ignored
-		// paths, so an already-synced ignored file keeps its RAGFlow document.
-		if (scope.ignored?.has(entry.path)) continue;
 		const mapping = isInScope(entry.path, scope);
 		if (!mapping) continue;
 		inScopePaths.add(entry.path);
@@ -65,8 +63,6 @@ export function classifyByStat(
 	// deletion — covering gone, filtered-out, and removed-mapping files.
 	for (const [vaultPath, record] of Object.entries(state.files)) {
 		if (inScopePaths.has(vaultPath)) continue;
-		// Frozen: an ignored synced file is kept, not deleted.
-		if (scope.ignored?.has(vaultPath)) continue;
 		result.deletions.push({
 			vaultPath,
 			record,
@@ -162,4 +158,78 @@ export function assembleChanges(
 	changes.push(...hashed.unchanged);
 
 	return changes;
+}
+
+/**
+ * Apply the ignore snapshots to the assembled change list (pure, synchronous).
+ *
+ * Each change whose path has an ignore snapshot is flagged `ignored` while it
+ * still matches that snapshot; the moment it drifts (content changed, or a
+ * deleted-then-ignored path reappears) the entry is reported in `staleIgnores`
+ * so the engine drops the snapshot and the change re-surfaces normally. A
+ * `pending` snapshot (migrated from the legacy freeze list) is captured into a
+ * real one. `currentHashes` supplies the file's current content hash for the
+ * cases stats alone cannot decide; when a needed hash is absent the entry is
+ * treated as drifted (re-surfaced) to avoid silently freezing an unreadable file.
+ */
+export function markIgnored(
+	changes: FileChange[],
+	ignoredEntries: Record<string, IgnoreSnapshot>,
+	currentHashes: Map<string, string>
+): SnoozeResult {
+	const staleIgnores: string[] = [];
+	const captured: Record<string, IgnoreSnapshot> = {};
+
+	for (const change of changes) {
+		const snap = ignoredEntries[change.vaultPath];
+		if (!snap) continue;
+		const hashNow = change.hash ?? currentHashes.get(change.vaultPath);
+
+		if ("deleted" in snap) {
+			// Ignored while gone: stays ignored only while still gone.
+			if (change.kind === "deleted") change.ignored = true;
+			else staleIgnores.push(change.vaultPath);
+			continue;
+		}
+
+		if ("pending" in snap) {
+			// Legacy freeze: keep it ignored and capture a real snapshot now.
+			change.ignored = true;
+			if (change.kind === "deleted") {
+				captured[change.vaultPath] = { deleted: true };
+			} else if (
+				hashNow !== undefined &&
+				change.size !== undefined &&
+				change.mtime !== undefined
+			) {
+				captured[change.vaultPath] = {
+					hash: hashNow,
+					size: change.size,
+					mtime: change.mtime,
+				};
+			}
+			continue;
+		}
+
+		// Snapshot of a once-present file.
+		if (change.kind === "deleted") {
+			// Snapshotted present, now gone: drifted — re-surface as a deletion.
+			staleIgnores.push(change.vaultPath);
+			continue;
+		}
+		if (change.size === snap.size && change.mtime === snap.mtime) {
+			change.ignored = true; // fast path: stats unchanged since ignore.
+		} else if (hashNow !== undefined && hashNow === snap.hash) {
+			change.ignored = true; // content identical; refresh drifted stats.
+			captured[change.vaultPath] = {
+				hash: snap.hash,
+				size: change.size ?? snap.size,
+				mtime: change.mtime ?? snap.mtime,
+			};
+		} else {
+			staleIgnores.push(change.vaultPath); // content drifted: re-surface.
+		}
+	}
+
+	return { changes, staleIgnores, captured };
 }

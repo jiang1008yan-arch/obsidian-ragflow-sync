@@ -6,6 +6,7 @@ import {
 	allFolderPaths,
 	buildTree,
 	changeSummary,
+	diffVisible,
 	foldersWithChanges,
 	isFileLeaf,
 	leavesOf,
@@ -22,17 +23,21 @@ const KIND_LABEL: Record<ChangeKind, string> = {
 	unchanged: "Up to date",
 };
 
+/** The two trees the panel switches between. */
+type Tab = "diff" | "sync";
+
 export class RagflowSyncView extends ItemView {
 	plugin: RagflowSyncPlugin;
+	/** The full diff: every in-scope file (all kinds) plus deletions. */
 	private changes: FileChange[] = [];
 	private statusEl: HTMLElement | null = null;
 	private busy = false;
-	/** Vault paths the user has ticked for a manual re-upload. */
+	/** Which tab is showing: the Scan-diff list or the full Sync picker. */
+	private activeTab: Tab = "diff";
+	/** Vault paths ticked in the current tab. Reset when the tab changes. */
 	private selected: Set<string> = new Set();
 	/** Folder paths currently expanded in the tree. */
 	private expanded: Set<string> = new Set();
-	/** Whether the "Ignored" section at the bottom is expanded. */
-	private ignoredExpanded = false;
 	/** Selection-dependent buttons, kept so their labels can update live. */
 	private syncSelectedBtn: HTMLButtonElement | null = null;
 	private ignoreSelectedBtn: HTMLButtonElement | null = null;
@@ -78,7 +83,7 @@ export class RagflowSyncView extends ItemView {
 			const result = await this.plugin.engine.computeDiff();
 			this.changes = result.changes;
 			// A fresh scan is a clean slate: drop any prior selection and expand the
-			// folders that hold actionable changes so they are visible at a glance.
+			// folders that hold visible entries so they are visible at a glance.
 			this.selected.clear();
 			this.expanded = foldersWithChanges(this.changes);
 			if (result.missingMappings.length > 0) {
@@ -101,26 +106,27 @@ export class RagflowSyncView extends ItemView {
 		}
 	}
 
+	/** Apply every Scan-diff-visible change that is not snoozed. */
 	async syncAll(): Promise<void> {
-		await this.syncChanges(this.changes);
+		await this.syncChanges(this.changes.filter((c) => !c.ignored));
 	}
 
 	/**
-	 * Re-upload exactly the files the user ticked, regardless of diff result.
-	 * An "unchanged" pick is promoted to "modified" (hash cleared) so the upload
-	 * step rebuilds RAGFlow's copy from the current source; a "deleted" pick
-	 * stays a deletion. Use to rebuild specific documents — e.g. ones removed or
-	 * left in a failed state on the RAGFlow side — without re-uploading the rest.
+	 * Re-upload exactly the files the user ticked in the Sync tab, regardless of
+	 * diff result. An "unchanged" pick is promoted to "modified" (hash cleared) so
+	 * the upload step rebuilds RAGFlow's copy from the current source. Use to
+	 * rebuild specific documents — e.g. ones removed or left in a failed state on
+	 * the RAGFlow side — without re-uploading the rest.
 	 */
 	async syncSelected(): Promise<void> {
 		const picks = this.changes.filter((c) => this.selected.has(c.vaultPath));
 		if (picks.length === 0) {
-			new Notice("No files selected. Tick the files you want to re-upload.");
+			new Notice("Tick files or folders to sync.");
 			return;
 		}
 		const forced = picks.map((c) =>
-			c.kind === "unchanged"
-				? { ...c, kind: "modified" as ChangeKind, hash: undefined }
+			c.kind === "unchanged" || c.ignored
+				? { ...c, kind: "modified" as ChangeKind, hash: undefined, ignored: false }
 				: c
 		);
 		await this.syncChanges(forced);
@@ -128,15 +134,18 @@ export class RagflowSyncView extends ItemView {
 
 	/**
 	 * Re-upload every in-scope file regardless of diff result, by promoting
-	 * "unchanged" entries to "modified". The command-palette "force re-sync"
-	 * escape hatch; the panel offers per-file selection instead.
+	 * "unchanged" entries to "modified". Snoozed (ignored) files are left alone.
+	 * The command-palette "force re-sync" escape hatch; the panel offers per-file
+	 * selection instead.
 	 */
 	async forceSyncAll(): Promise<void> {
-		const forced = this.changes.map((c) =>
-			c.kind === "unchanged"
-				? { ...c, kind: "modified" as ChangeKind, hash: undefined }
-				: c
-		);
+		const forced = this.changes
+			.filter((c) => !c.ignored)
+			.map((c) =>
+				c.kind === "unchanged"
+					? { ...c, kind: "modified" as ChangeKind, hash: undefined }
+					: c
+			);
 		await this.syncChanges(forced);
 	}
 
@@ -171,37 +180,62 @@ export class RagflowSyncView extends ItemView {
 	}
 
 	/**
-	 * Freeze the ticked files: add them to the persistent ignore list so the Diff
-	 * skips them — never uploaded, and any already-synced document left in place.
-	 * Dropped from the current diff view without a re-scan; they reappear under
-	 * "Ignored" where they can be un-ignored.
+	 * Snooze the ticked files: snapshot each and add it to ignoredEntries so the
+	 * Scan diff shows it with an "Ignored" badge and "Sync all" skips it. It
+	 * re-surfaces on the next scan once its content drifts from the snapshot.
 	 */
 	async ignoreSelected(): Promise<void> {
 		if (this.selected.size === 0) {
-			new Notice("No files selected. Tick the files you want to ignore.");
+			new Notice("Tick the files you want to ignore.");
 			return;
 		}
-		const picked = this.selected;
-		const merged = new Set(this.plugin.settings.ignoredPaths);
-		for (const path of picked) merged.add(path);
-		this.plugin.settings.ignoredPaths = [...merged].sort((a, b) =>
-			a.localeCompare(b)
-		);
+		const picked = [...this.selected];
+		for (const path of picked) {
+			this.plugin.settings.ignoredEntries[path] =
+				await this.plugin.engine.snapshotForIgnore(path);
+		}
 		await this.plugin.saveSettings();
-
-		this.changes = this.changes.filter((c) => !picked.has(c.vaultPath));
-		this.selected = new Set();
+		// Reflect the snooze immediately without a rescan.
+		for (const change of this.changes) {
+			if (this.selected.has(change.vaultPath)) change.ignored = true;
+		}
+		this.selected.clear();
 		this.render();
-		new Notice(`Ignoring ${picked.size} file(s).`);
+		new Notice(`Ignoring ${picked.length} file(s).`);
 	}
 
-	/** Un-freeze one path, then re-scan so it re-enters the diff classified. */
-	async unignore(path: string): Promise<void> {
-		this.plugin.settings.ignoredPaths =
-			this.plugin.settings.ignoredPaths.filter((p) => p !== path);
+	/** Un-snooze the ticked files so they re-enter the diff classified normally. */
+	async unignoreSelected(): Promise<void> {
+		if (this.selected.size === 0) {
+			new Notice("Tick the ignored files you want to un-ignore.");
+			return;
+		}
+		const picked = [...this.selected];
+		for (const path of picked) {
+			delete this.plugin.settings.ignoredEntries[path];
+		}
 		await this.plugin.saveSettings();
+		for (const change of this.changes) {
+			if (this.selected.has(change.vaultPath)) change.ignored = false;
+		}
+		this.selected.clear();
 		this.render();
-		await this.scan();
+	}
+
+	/** Whether every ticked file is currently snoozed (drives the toggle label). */
+	private allSelectedIgnored(): boolean {
+		if (this.selected.size === 0) return false;
+		return this.changes
+			.filter((c) => this.selected.has(c.vaultPath))
+			.every((c) => c.ignored);
+	}
+
+	/** The change list backing the active tab. */
+	private tabData(): FileChange[] {
+		return this.activeTab === "diff"
+			? diffVisible(this.changes)
+			: // Sync picker: every present in-scope file (deletions have no file).
+				this.changes.filter((c) => c.kind !== "deleted");
 	}
 
 	private render(): void {
@@ -211,46 +245,80 @@ export class RagflowSyncView extends ItemView {
 
 		this.syncSelectedBtn = null;
 		this.ignoreSelectedBtn = null;
+
+		this.renderTabs(container.createDiv({ cls: "ragflow-sync-tabs" }));
+
 		const toolbar = container.createDiv({ cls: "ragflow-sync-toolbar" });
 		this.renderToolbar(toolbar);
 
 		this.statusEl = container.createDiv({ cls: "ragflow-sync-status" });
 
+		const data = this.tabData();
 		if (this.changes.length === 0) {
 			container.createDiv({
 				cls: "ragflow-sync-empty",
 				text: 'No scan results yet. Click "Scan diff" to compare your vault with RAGFlow.',
 			});
+		} else if (data.length === 0) {
+			container.createDiv({
+				cls: "ragflow-sync-empty",
+				text:
+					this.activeTab === "diff"
+						? "Everything is up to date."
+						: "No in-scope files to show.",
+			});
 		} else {
 			const tree = container.createDiv({ cls: "ragflow-sync-tree" });
-			const root = buildTree(this.changes);
-			this.renderChildren(tree, root, 0);
+			this.renderChildren(tree, buildTree(data), 0);
 		}
 
-		this.renderIgnored(container);
 		this.updateSelectionUi();
+	}
+
+	/** The Scan diff / Sync segmented toggle. */
+	private renderTabs(bar: HTMLElement): void {
+		const tab = (id: Tab, label: string) => {
+			const btn = bar.createEl("button", { text: label });
+			btn.toggleClass("mod-cta", this.activeTab === id);
+			btn.onclick = () => {
+				if (this.activeTab === id) return;
+				this.activeTab = id;
+				this.selected.clear();
+				this.render();
+			};
+		};
+		tab("diff", "Scan diff");
+		tab("sync", "Sync");
 	}
 
 	private renderToolbar(toolbar: HTMLElement): void {
 		const scanBtn = toolbar.createEl("button", { text: "Scan diff" });
 		scanBtn.onclick = () => void this.scan();
 
-		const syncAllBtn = toolbar.createEl("button", { text: "Sync all" });
-		syncAllBtn.addClass("mod-cta");
-		syncAllBtn.onclick = () => void this.syncChanges(this.changes);
+		if (this.activeTab === "diff") {
+			const syncAllBtn = toolbar.createEl("button", { text: "Sync all" });
+			syncAllBtn.addClass("mod-cta");
+			syncAllBtn.onclick = () => void this.syncAll();
 
-		this.syncSelectedBtn = toolbar.createEl("button", { text: "Sync selected" });
-		this.syncSelectedBtn.onclick = () => void this.syncSelected();
-
-		this.ignoreSelectedBtn = toolbar.createEl("button", {
-			text: "Ignore selected",
-		});
-		this.ignoreSelectedBtn.onclick = () => void this.ignoreSelected();
+			this.ignoreSelectedBtn = toolbar.createEl("button", {
+				text: "Ignore selected",
+			});
+			this.ignoreSelectedBtn.onclick = () =>
+				void (this.allSelectedIgnored()
+					? this.unignoreSelected()
+					: this.ignoreSelected());
+		} else {
+			this.syncSelectedBtn = toolbar.createEl("button", {
+				text: "Sync selected",
+			});
+			this.syncSelectedBtn.addClass("mod-cta");
+			this.syncSelectedBtn.onclick = () => void this.syncSelected();
+		}
 
 		if (this.changes.length > 0) {
 			const expandBtn = toolbar.createEl("button", { text: "Expand all" });
 			expandBtn.onclick = () => {
-				this.expanded = allFolderPaths(this.changes);
+				this.expanded = allFolderPaths(this.tabData());
 				this.render();
 			};
 			const collapseBtn = toolbar.createEl("button", { text: "Collapse all" });
@@ -310,9 +378,12 @@ export class RagflowSyncView extends ItemView {
 		label.setText(node.name);
 		label.onclick = () => this.toggleFolder(node.path);
 
-		const summary = changeSummary(leaves);
-		if (summary) {
-			row.createSpan({ cls: "ragflow-tree-count", text: summary });
+		// The Sync picker is status-free; only the Scan diff tab summarizes counts.
+		if (this.activeTab === "diff") {
+			const summary = changeSummary(leaves);
+			if (summary) {
+				row.createSpan({ cls: "ragflow-tree-count", text: summary });
+			}
 		}
 
 		if (expanded) {
@@ -341,50 +412,13 @@ export class RagflowSyncView extends ItemView {
 		};
 
 		row.createDiv({ cls: "ragflow-tree-name", text: node.name });
-		row.createSpan({
-			cls: `ragflow-sync-badge ${change.kind}`,
-			text: KIND_LABEL[change.kind],
-		});
-	}
 
-	/** Collapsible list of ignored (frozen) paths, each with an un-ignore action. */
-	private renderIgnored(container: HTMLElement): void {
-		const paths = this.plugin.settings.ignoredPaths;
-		if (paths.length === 0) return;
-
-		const section = container.createDiv({ cls: "ragflow-sync-ignored" });
-		const header = section.createDiv({ cls: "ragflow-tree-row ragflow-ignored-header" });
-		const twisty = header.createSpan({
-			cls: "ragflow-tree-twisty",
-			text: this.ignoredExpanded ? "▾" : "▸",
-		});
-		twisty.onclick = () => this.toggleIgnored();
-		const label = header.createDiv({ cls: "ragflow-tree-name" });
-		label.setText(`Ignored (${paths.length})`);
-		label.onclick = () => this.toggleIgnored();
-
-		const unignoreAll = header.createEl("button", { text: "Un-ignore all" });
-		unignoreAll.onclick = async () => {
-			this.plugin.settings.ignoredPaths = [];
-			await this.plugin.saveSettings();
-			this.render();
-			await this.scan();
-		};
-
-		if (!this.ignoredExpanded) return;
-		const list = section.createDiv({ cls: "ragflow-tree-children" });
-		for (const path of paths) {
-			const row = list.createDiv({ cls: "ragflow-tree-row ragflow-tree-file" });
-			row.style.paddingLeft = "16px";
-			row.createDiv({ cls: "ragflow-tree-name", text: path });
-			const btn = row.createEl("button", { text: "Un-ignore" });
-			btn.onclick = () => void this.unignore(path);
+		// Badges live only in the Scan diff tab; the Sync picker shows no status.
+		if (this.activeTab === "diff") {
+			const kind = change.ignored ? "ignored" : change.kind;
+			const text = change.ignored ? "Ignored" : KIND_LABEL[change.kind];
+			row.createSpan({ cls: `ragflow-sync-badge ${kind}`, text });
 		}
-	}
-
-	private toggleIgnored(): void {
-		this.ignoredExpanded = !this.ignoredExpanded;
-		this.render();
 	}
 
 	private toggleFolder(path: string): void {
@@ -401,14 +435,12 @@ export class RagflowSyncView extends ItemView {
 				n > 0 ? `Sync selected (${n})` : "Sync selected"
 			);
 			this.syncSelectedBtn.toggleClass("mod-warning", n > 0);
-			this.syncSelectedBtn.disabled = n === 0;
 		}
 		if (this.ignoreSelectedBtn) {
-			this.ignoreSelectedBtn.setText(
-				n > 0 ? `Ignore selected (${n})` : "Ignore selected"
-			);
+			const unignore = this.allSelectedIgnored();
+			const verb = unignore ? "Un-ignore selected" : "Ignore selected";
+			this.ignoreSelectedBtn.setText(n > 0 ? `${verb} (${n})` : verb);
 			this.ignoreSelectedBtn.disabled = n === 0;
 		}
 	}
-
 }
