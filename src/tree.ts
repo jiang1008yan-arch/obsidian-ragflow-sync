@@ -85,12 +85,14 @@ export function changeSummary(leaves: TreeNode[]): string {
 }
 
 /**
- * The changes the Scan diff tab shows: everything actionable plus snoozed
- * (ignored) entries, but not files that are merely up to date. The Sync tab
- * uses the full list instead so any file can be picked for a manual upload.
+ * The changes the Scan diff tab shows: only the three actionable states
+ * New / Modified / Deleted. Up-to-date files and snoozed (ignored) files are
+ * left out to keep the list uncluttered — ignored files stay tracked in the
+ * background and re-surface once they drift. The Sync tab uses the full list
+ * instead so any file can be picked for a manual upload.
  */
 export function diffVisible(changes: FileChange[]): FileChange[] {
-	return changes.filter((c) => c.ignored || c.kind !== "unchanged");
+	return changes.filter((c) => c.kind !== "unchanged" && !c.ignored);
 }
 
 /** Ancestor folder paths of a vault path (excludes the file itself). */
@@ -107,7 +109,7 @@ function addAncestorFolders(vaultPath: string, set: Set<string>): void {
 export function foldersWithChanges(changes: FileChange[]): Set<string> {
 	const set = new Set<string>();
 	for (const change of changes) {
-		if (change.kind === "unchanged" && !change.ignored) continue;
+		if (change.kind === "unchanged" || change.ignored) continue;
 		addAncestorFolders(change.vaultPath, set);
 	}
 	return set;

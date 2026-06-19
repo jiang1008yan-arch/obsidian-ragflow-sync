@@ -1500,7 +1500,7 @@ function changeSummary(leaves) {
   return parts.join(", ");
 }
 function diffVisible(changes) {
-  return changes.filter((c) => c.ignored || c.kind !== "unchanged");
+  return changes.filter((c) => c.kind !== "unchanged" && !c.ignored);
 }
 function addAncestorFolders(vaultPath, set) {
   const parts = vaultPath.split("/");
@@ -1513,16 +1513,10 @@ function addAncestorFolders(vaultPath, set) {
 function foldersWithChanges(changes) {
   const set = /* @__PURE__ */ new Set();
   for (const change of changes) {
-    if (change.kind === "unchanged" && !change.ignored)
+    if (change.kind === "unchanged" || change.ignored)
       continue;
     addAncestorFolders(change.vaultPath, set);
   }
-  return set;
-}
-function allFolderPaths(changes) {
-  const set = /* @__PURE__ */ new Set();
-  for (const change of changes)
-    addAncestorFolders(change.vaultPath, set);
   return set;
 }
 
@@ -1690,30 +1684,6 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
     this.render();
     new import_obsidian5.Notice(`Ignoring ${picked.length} file(s).`);
   }
-  /** Un-snooze the ticked files so they re-enter the diff classified normally. */
-  async unignoreSelected() {
-    if (this.selected.size === 0) {
-      new import_obsidian5.Notice("Tick the ignored files you want to un-ignore.");
-      return;
-    }
-    const picked = [...this.selected];
-    for (const path of picked) {
-      delete this.plugin.settings.ignoredEntries[path];
-    }
-    await this.plugin.saveSettings();
-    for (const change of this.changes) {
-      if (this.selected.has(change.vaultPath))
-        change.ignored = false;
-    }
-    this.selected.clear();
-    this.render();
-  }
-  /** Whether every ticked file is currently snoozed (drives the toggle label). */
-  allSelectedIgnored() {
-    if (this.selected.size === 0)
-      return false;
-    return this.changes.filter((c) => this.selected.has(c.vaultPath)).every((c) => c.ignored);
-  }
   /** The change list backing the active tab. */
   tabData() {
     return this.activeTab === "diff" ? diffVisible(this.changes) : (
@@ -1759,40 +1729,30 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
         this.activeTab = id;
         this.selected.clear();
         this.render();
+        if (id === "sync" && this.changes.length === 0)
+          void this.scan();
       };
     };
     tab("diff", "Scan diff");
     tab("sync", "Sync");
   }
   renderToolbar(toolbar) {
-    const scanBtn = toolbar.createEl("button", { text: "Scan diff" });
-    scanBtn.onclick = () => void this.scan();
     if (this.activeTab === "diff") {
+      const scanBtn = toolbar.createEl("button", { text: "Scan diff" });
+      scanBtn.onclick = () => void this.scan();
       const syncAllBtn = toolbar.createEl("button", { text: "Sync all" });
       syncAllBtn.addClass("mod-cta");
       syncAllBtn.onclick = () => void this.syncAll();
       this.ignoreSelectedBtn = toolbar.createEl("button", {
         text: "Ignore selected"
       });
-      this.ignoreSelectedBtn.onclick = () => void (this.allSelectedIgnored() ? this.unignoreSelected() : this.ignoreSelected());
+      this.ignoreSelectedBtn.onclick = () => void this.ignoreSelected();
     } else {
       this.syncSelectedBtn = toolbar.createEl("button", {
         text: "Sync selected"
       });
       this.syncSelectedBtn.addClass("mod-cta");
       this.syncSelectedBtn.onclick = () => void this.syncSelected();
-    }
-    if (this.changes.length > 0) {
-      const expandBtn = toolbar.createEl("button", { text: "Expand all" });
-      expandBtn.onclick = () => {
-        this.expanded = allFolderPaths(this.tabData());
-        this.render();
-      };
-      const collapseBtn = toolbar.createEl("button", { text: "Collapse all" });
-      collapseBtn.onclick = () => {
-        this.expanded.clear();
-        this.render();
-      };
     }
   }
   /** Render the folders-then-files under a node, sorted, at the given depth. */
@@ -1860,9 +1820,10 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
     };
     row.createDiv({ cls: "ragflow-tree-name", text: node.name });
     if (this.activeTab === "diff") {
-      const kind = change.ignored ? "ignored" : change.kind;
-      const text = change.ignored ? "Ignored" : KIND_LABEL[change.kind];
-      row.createSpan({ cls: `ragflow-sync-badge ${kind}`, text });
+      row.createSpan({
+        cls: `ragflow-sync-badge ${change.kind}`,
+        text: KIND_LABEL[change.kind]
+      });
     }
   }
   toggleFolder(path) {
@@ -1882,9 +1843,9 @@ var RagflowSyncView = class extends import_obsidian5.ItemView {
       this.syncSelectedBtn.toggleClass("mod-warning", n > 0);
     }
     if (this.ignoreSelectedBtn) {
-      const unignore = this.allSelectedIgnored();
-      const verb = unignore ? "Un-ignore selected" : "Ignore selected";
-      this.ignoreSelectedBtn.setText(n > 0 ? `${verb} (${n})` : verb);
+      this.ignoreSelectedBtn.setText(
+        n > 0 ? `Ignore selected (${n})` : "Ignore selected"
+      );
       this.ignoreSelectedBtn.disabled = n === 0;
     }
   }
