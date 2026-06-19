@@ -263,9 +263,21 @@ export class SyncEngine {
 						this.recordUpload(uploaded, up);
 					} else if (change.kind === "deleted") {
 						if (change.record) {
-							await this.client.deleteDocuments(change.record.datasetId, [
-								change.record.documentId,
-							]);
+							// The document — or the whole dataset — may already be gone
+							// from RAGFlow (deleted there directly). That is the end state
+							// we want, so swallow the error and still drop the local record;
+							// otherwise the record survives and the deletion re-appears on
+							// every scan as an un-clearable phantom.
+							try {
+								await this.client.deleteDocuments(change.record.datasetId, [
+									change.record.documentId,
+								]);
+							} catch (e) {
+								console.warn(
+									`RAGFlow Sync: delete of ${change.vaultPath} failed ` +
+										`(treating as already gone): ${(e as Error).message}`
+								);
+							}
 						}
 						this.store.deleteFile(change.vaultPath);
 					}
