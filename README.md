@@ -16,6 +16,8 @@ rather than noise in the document body. Your vault note is never modified.
 - Map one or more Obsidian folders to target RAGFlow datasets.
 - Strip each note's frontmatter on upload and set it as document metadata via
   the RAGFlow metadata API; the original note stays unchanged.
+- Push a note's `tags` onto every chunk of its parsed document as
+  `important_keywords` (the **Tags** tab), to boost retrieval recall.
 - Scan differences before uploading or deleting anything, shown as an
   expandable vault-folder tree.
 - Sync all changes, or tick specific files and folders and sync only those.
@@ -365,6 +367,34 @@ an already-synced document would be *deleted* on the next sync; ignoring keeps
 the existing document untouched. Ignored files collect under a collapsible
 `Ignored (N)` section at the bottom of the panel, where `Un-ignore` (or
 `Un-ignore all`) returns them to normal diffing on the next scan.
+
+### Tagging Chunks
+
+Frontmatter becomes *document-level* metadata, which RAGFlow uses for filtering.
+The **Tags** tab pushes a note's tags one level deeper — onto every **chunk** of
+its parsed document as that chunk's `important_keywords`, which boosts how well a
+query recalls those chunks. It reads the note's `tags` frontmatter (a YAML list,
+or a space/comma-separated string; a leading `#` is dropped and a nested tag like
+`area/ml` is kept whole) and writes the same set onto all of that note's chunks.
+
+The Tags tab shows your already-synced documents as the same folder tree. Click
+`Apply tags (all)` to tag every synced document, or tick specific files/folders
+and click `Apply tags (N)`. You can also run `RAGFlow Sync: Apply tags to chunks`
+from the command palette to tag everything.
+
+Because chunks only exist after parsing, tagging is a **post-parse** step:
+
+- A document that has not finished parsing yet is skipped and reported
+  (*"3 not parsed yet"*) — wait for parsing to settle, then click again.
+- A note with no `tags` is left untouched.
+- Tags **replace** a chunk's existing keywords, and a chunk already carrying the
+  right tags is not rewritten, so re-running is cheap and idempotent.
+- Re-syncing a note rebuilds its document and chunks from scratch, dropping the
+  chunk tags — so re-apply tags after a re-sync. The panel reminds you after an
+  upload, but never tags automatically.
+
+Non-Markdown documents (e.g. PDFs) inherit their companion note's tags, the same
+way they inherit companion metadata.
 
 ## How Sync Works
 

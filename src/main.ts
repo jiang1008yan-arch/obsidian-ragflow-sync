@@ -73,6 +73,16 @@ export default class RagflowSyncPlugin extends Plugin {
 			},
 		});
 
+		this.addCommand({
+			id: "ragflow-apply-tags",
+			name: "Apply tags to chunks",
+			callback: async () => {
+				const view = await this.activateView();
+				if (!view) return;
+				await view.applyTagsAll();
+			},
+		});
+
 		this.addSettingTab(new RagflowSyncSettingTab(this.app, this));
 	}
 
