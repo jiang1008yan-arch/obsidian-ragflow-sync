@@ -367,6 +367,13 @@ Content-Type: ${contentType}\r
 }
 
 // src/ragflowClient.ts
+function normalizeChunk(raw) {
+  return {
+    id: raw.id ?? raw.chunk_id ?? "",
+    content: raw.content ?? raw.content_with_weight ?? "",
+    important_keywords: raw.important_keywords ?? raw.important_kwd ?? []
+  };
+}
 var PAGE_SIZE = 100;
 function isDuplicateName(candidate, baseName) {
   const dot = baseName.lastIndexOf(".");
@@ -584,6 +591,66 @@ var RagflowClient = class {
       method: "POST",
       headers: this.headers({ "Content-Type": "application/json" }),
       body: JSON.stringify({ document_ids: ids })
+    });
+  }
+  /**
+   * Parse status and chunk count of a single document, read from the dataset's
+   * document list filtered by id. Returns undefined when the document is no
+   * longer in the dataset. Used by the tag-application run to decide whether a
+   * document is parsed (run === "DONE", chunk_count > 0) before tagging.
+   */
+  async getDocumentStatus(datasetId, documentId) {
+    const data = await this.send({
+      url: `${this.base()}/datasets/${datasetId}/documents${this.query({
+        id: documentId,
+        page: 1,
+        page_size: 1
+      })}`,
+      method: "GET",
+      headers: this.headers()
+    });
+    const doc = data?.docs?.[0];
+    if (!doc)
+      return void 0;
+    return { run: doc.run, chunkCount: doc.chunk_count ?? 0 };
+  }
+  /**
+   * Every chunk of a parsed document, paginating fully. Chunks only exist after
+   * parsing completes; an unparsed document returns an empty list. Normalized to
+   * RagflowChunk so callers see a stable shape across RAGFlow versions.
+   */
+  async listChunks(datasetId, documentId) {
+    const all = [];
+    let page = 1;
+    while (true) {
+      const data = await this.send({
+        url: `${this.base()}/datasets/${datasetId}/documents/${documentId}/chunks${this.query(
+          { page, page_size: PAGE_SIZE }
+        )}`,
+        method: "GET",
+        headers: this.headers()
+      });
+      const chunks = data?.chunks ?? [];
+      for (const c of chunks)
+        all.push(normalizeChunk(c));
+      if (chunks.length < PAGE_SIZE)
+        break;
+      page += 1;
+    }
+    return all;
+  }
+  /**
+   * Replace one chunk's important_keywords. The chunk's content is echoed back
+   * unchanged because RAGFlow's Update-chunk endpoint can require it alongside
+   * the keywords; sending the same content is a no-op for the body but keeps the
+   * call valid across versions.
+   */
+  async updateChunkKeywords(datasetId, documentId, chunkId, keywords, content) {
+    await this.send({
+      url: `${this.base()}/datasets/${datasetId}/documents/${documentId}/chunks/${chunkId}`,
+      method: "PUT",
+      headers: this.headers({ "Content-Type": "application/json" }),
+      body: JSON.stringify({ content, important_keywords: keywords })
     });
   }
   async deleteDocuments(datasetId, ids) {
@@ -1417,6 +1484,108 @@ var SyncApplyRun = class {
   }
 };
 
+// src/noteTags.ts
+function noteTags(tagsValue) {
+  const out = [];
+  const push = (raw) => {
+    for (const piece of raw.split(/[\s,]+/)) {
+      const tag = piece.replace(/^#+/, "").trim();
+      if (tag)
+        out.push(tag);
+    }
+  };
+  const visit = (v) => {
+    if (v === null || v === void 0)
+      return;
+    if (Array.isArray(v)) {
+      v.forEach(visit);
+    } else if (typeof v === "string") {
+      push(v);
+    } else if (typeof v === "number" || typeof v === "boolean") {
+      push(String(v));
+    }
+  };
+  visit(tagsValue);
+  return [...new Set(out)];
+}
+
+// src/applyTagRun.ts
+async function applyTagRun(input) {
+  const { vault, client, settings, targets, onProgress } = input;
+  const result = {
+    tagged: 0,
+    chunksWritten: 0,
+    skippedUnparsed: 0,
+    skippedNoTags: 0,
+    failed: 0,
+    errors: []
+  };
+  const companionIndex = await buildCompanionIndex(settings, vault);
+  let done = 0;
+  for (const target of targets) {
+    try {
+      await tagOne(client, target, await resolveTags(vault, companionIndex, target), result);
+    } catch (e) {
+      result.failed += 1;
+      result.errors.push(`${target.vaultPath}: ${e.message}`);
+    }
+    done += 1;
+    onProgress?.(done, targets.length, target.vaultPath);
+  }
+  return result;
+}
+async function tagOne(client, target, tags, result) {
+  if (tags.length === 0) {
+    result.skippedNoTags += 1;
+    return;
+  }
+  const { datasetId, documentId } = target.record;
+  const status = await client.getDocumentStatus(datasetId, documentId);
+  if (!status || status.run !== "DONE" || status.chunkCount === 0) {
+    result.skippedUnparsed += 1;
+    return;
+  }
+  const chunks = await client.listChunks(datasetId, documentId);
+  if (chunks.length === 0) {
+    result.skippedUnparsed += 1;
+    return;
+  }
+  for (const chunk of chunks) {
+    if (sameKeywords(chunk.important_keywords, tags))
+      continue;
+    await client.updateChunkKeywords(
+      datasetId,
+      documentId,
+      chunk.id,
+      tags,
+      chunk.content
+    );
+    result.chunksWritten += 1;
+  }
+  result.tagged += 1;
+}
+async function resolveTags(vault, companionIndex, target) {
+  const file = vault.getFile(target.vaultPath);
+  if (!file)
+    return [];
+  if (file.extension.toLowerCase() === "md") {
+    const fm = await vault.frontmatter(file);
+    return noteTags(fm?.["tags"]);
+  }
+  const sourceFolder = target.mapping?.companionSourceFolder;
+  if (!sourceFolder)
+    return [];
+  const companion = lookupCompanion(companionIndex, sourceFolder, file);
+  return companion ? noteTags(companion["tags"]) : [];
+}
+function sameKeywords(a, b) {
+  if (a.length !== b.length)
+    return false;
+  const sa = [...a].sort();
+  const sb = [...b].sort();
+  return sa.every((v, i) => v === sb[i]);
+}
+
 // src/vaultAccess.ts
 var import_obsidian5 = require("obsidian");
 var ObsidianVaultAccess = class {
@@ -1593,6 +1762,29 @@ var SyncEngine = class {
       processingVersion: PROCESSING_VERSION
     });
   }
+  /**
+   * Every synced document as a tag target, paired with the mapping that owns its
+   * path (needed only to find a companion note's tags for a non-markdown file).
+   * This is the universe the Tags tab lists — the documents that have, or will
+   * have, chunks.
+   */
+  tagTargets() {
+    const scope = this.scope();
+    return Object.entries(this.store.allFiles()).map(([vaultPath, record]) => ({
+      vaultPath,
+      record,
+      mapping: owningMapping(vaultPath, scope)
+    }));
+  }
+  async applyTags(targets, onProgress) {
+    return applyTagRun({
+      vault: this.vault,
+      client: this.client,
+      settings: this.getSettings(),
+      targets,
+      onProgress
+    });
+  }
 };
 function summarize(changes) {
   const counts = {
@@ -1697,6 +1889,12 @@ function foldersWithChanges(changes) {
   }
   return set;
 }
+function allFolderPaths(changes) {
+  const set = /* @__PURE__ */ new Set();
+  for (const change of changes)
+    addAncestorFolders(change.vaultPath, set);
+  return set;
+}
 
 // src/panelState.ts
 function tabData(tab, changes) {
@@ -1736,6 +1934,10 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
     super(leaf);
     /** The full diff: every in-scope file (all kinds) plus deletions. */
     this.changes = [];
+    /** Tags tab universe: every synced document, with its owning mapping. */
+    this.tagTargets = [];
+    /** Tags tab tree data: tagTargets as badge-free leaves for the folder tree. */
+    this.tagChanges = [];
     this.statusEl = null;
     this.busy = false;
     /** Which tab is showing: the Scan-diff list or the full Sync picker. */
@@ -1747,6 +1949,7 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
     /** Selection-dependent buttons, kept so their labels can update live. */
     this.syncSelectedBtn = null;
     this.ignoreSelectedBtn = null;
+    this.applyTagsBtn = null;
     this.plugin = plugin;
   }
   getViewType() {
@@ -1845,6 +2048,14 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
       if (result.errors.length > 0) {
         console.error("RAGFlow Sync errors:", result.errors);
       }
+      const uploads = actionable.filter(
+        (c) => c.kind === "new" || c.kind === "modified"
+      ).length;
+      if (uploads > 0) {
+        new import_obsidian6.Notice(
+          "Re-apply tags from the Tags tab once parsing finishes."
+        );
+      }
     } catch (e) {
       new import_obsidian6.Notice(`Sync failed: ${e.message}`);
     } finally {
@@ -1875,9 +2086,80 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
     this.render();
     new import_obsidian6.Notice(`Ignoring ${picked.length} file(s).`);
   }
+  /**
+   * Rebuild the Tags tab list from Synced state. Cheap (reads in-memory state),
+   * so it runs on every entry to the tab to stay fresh after a sync. Each synced
+   * document becomes a badge-free "unchanged" leaf for the shared folder tree.
+   */
+  loadTagTargets() {
+    this.tagTargets = this.plugin.engine.tagTargets();
+    this.tagChanges = this.tagTargets.map((t) => ({
+      kind: "unchanged",
+      vaultPath: t.vaultPath,
+      record: t.record
+    }));
+    this.expanded = allFolderPaths(this.tagChanges);
+  }
+  /**
+   * Apply each note's tags to its document's chunks. Selection-aware: ticked
+   * files are tagged; with nothing ticked, every synced document is. Documents
+   * not parsed yet (or notes without tags) are skipped and reported.
+   */
+  async applyTags() {
+    if (this.busy)
+      return;
+    if (this.tagTargets.length === 0) {
+      new import_obsidian6.Notice("Nothing synced to tag yet.");
+      return;
+    }
+    const targets = this.selected.size > 0 ? this.tagTargets.filter((t) => this.selected.has(t.vaultPath)) : this.tagTargets;
+    if (targets.length === 0) {
+      new import_obsidian6.Notice("Tick files to tag, or untick all to tag everything.");
+      return;
+    }
+    this.busy = true;
+    this.setStatus(`Tagging ${targets.length} document(s)...`);
+    try {
+      const result = await this.plugin.engine.applyTags(
+        targets,
+        (done, total, label) => {
+          this.setStatus(`Tagging ${done}/${total}: ${label}`);
+        }
+      );
+      let msg = `Tagged ${result.tagged} document(s), ${result.chunksWritten} chunk(s) updated.`;
+      if (result.skippedUnparsed > 0) {
+        msg += ` ${result.skippedUnparsed} not parsed yet.`;
+      }
+      if (result.skippedNoTags > 0)
+        msg += ` ${result.skippedNoTags} without tags.`;
+      if (result.failed > 0)
+        msg += ` ${result.failed} failed.`;
+      new import_obsidian6.Notice(msg);
+      this.setStatus(msg);
+      if (result.errors.length > 0) {
+        console.error("RAGFlow Sync tag errors:", result.errors);
+      }
+    } catch (e) {
+      new import_obsidian6.Notice(`Tagging failed: ${e.message}`);
+      this.setStatus(`Tagging failed: ${e.message}`);
+    } finally {
+      this.busy = false;
+    }
+  }
+  /**
+   * Switch to the Tags tab and tag every synced document. The command-palette
+   * entry point; the panel button offers selection-scoped tagging instead.
+   */
+  async applyTagsAll() {
+    this.activeTab = "tags";
+    this.selected.clear();
+    this.loadTagTargets();
+    this.render();
+    await this.applyTags();
+  }
   /** The change list backing the active tab. */
   tabData() {
-    return tabData(this.activeTab, this.changes);
+    return this.activeTab === "tags" ? this.tagChanges : tabData(this.activeTab, this.changes);
   }
   render() {
     const container = this.containerEl.children[1];
@@ -1885,20 +2167,16 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
     container.addClass("ragflow-sync-view");
     this.syncSelectedBtn = null;
     this.ignoreSelectedBtn = null;
+    this.applyTagsBtn = null;
     this.renderTabs(container.createDiv({ cls: "ragflow-sync-tabs" }));
     const toolbar = container.createDiv({ cls: "ragflow-sync-toolbar" });
     this.renderToolbar(toolbar);
     this.statusEl = container.createDiv({ cls: "ragflow-sync-status" });
     const data = this.tabData();
-    if (this.changes.length === 0) {
+    if (data.length === 0) {
       container.createDiv({
         cls: "ragflow-sync-empty",
-        text: 'No scan results yet. Click "Scan diff" to compare your vault with RAGFlow.'
-      });
-    } else if (data.length === 0) {
-      container.createDiv({
-        cls: "ragflow-sync-empty",
-        text: this.activeTab === "diff" ? "Everything is up to date." : "No in-scope files to show."
+        text: this.emptyMessage()
       });
     } else {
       const tree = container.createDiv({ cls: "ragflow-sync-tree" });
@@ -1906,7 +2184,17 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
     }
     this.updateSelectionUi();
   }
-  /** The Scan diff / Sync segmented toggle. */
+  /** The empty-state line for the active tab when it has nothing to show. */
+  emptyMessage() {
+    if (this.activeTab === "tags") {
+      return "No synced documents yet. Sync files first, then apply tags.";
+    }
+    if (this.changes.length === 0) {
+      return 'No scan results yet. Click "Scan diff" to compare your vault with RAGFlow.';
+    }
+    return this.activeTab === "diff" ? "Everything is up to date." : "No in-scope files to show.";
+  }
+  /** The Scan diff / Sync / Tags segmented toggle. */
   renderTabs(bar) {
     const tab = (id, label) => {
       const btn = bar.createEl("button", { text: label });
@@ -1916,6 +2204,8 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
           return;
         this.activeTab = id;
         this.selected.clear();
+        if (id === "tags")
+          this.loadTagTargets();
         this.render();
         if (id === "sync" && this.changes.length === 0)
           void this.scan();
@@ -1923,6 +2213,7 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
     };
     tab("diff", "Scan diff");
     tab("sync", "Sync");
+    tab("tags", "Tags");
   }
   renderToolbar(toolbar) {
     if (this.activeTab === "diff") {
@@ -1939,12 +2230,18 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
         text: "Ignore selected"
       });
       this.ignoreSelectedBtn.onclick = () => void this.ignoreSelected();
-    } else {
+    } else if (this.activeTab === "sync") {
       this.syncSelectedBtn = toolbar.createEl("button", {
         text: "Sync selected"
       });
       this.syncSelectedBtn.addClass("mod-cta");
       this.syncSelectedBtn.onclick = () => void this.syncSelected();
+    } else {
+      this.applyTagsBtn = toolbar.createEl("button", {
+        text: "Apply tags"
+      });
+      this.applyTagsBtn.addClass("mod-cta");
+      this.applyTagsBtn.onclick = () => void this.applyTags();
     }
   }
   /** Render the folders-then-files under a node, sorted, at the given depth. */
@@ -2040,6 +2337,11 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
       );
       this.ignoreSelectedBtn.disabled = n === 0;
     }
+    if (this.applyTagsBtn) {
+      this.applyTagsBtn.setText(
+        n > 0 ? `Apply tags (${n})` : "Apply tags (all)"
+      );
+    }
   }
 };
 
@@ -2098,6 +2400,16 @@ var RagflowSyncPlugin = class extends import_obsidian7.Plugin {
           return;
         await view.scan();
         await view.forceSyncAll();
+      }
+    });
+    this.addCommand({
+      id: "ragflow-apply-tags",
+      name: "Apply tags to chunks",
+      callback: async () => {
+        const view = await this.activateView();
+        if (!view)
+          return;
+        await view.applyTagsAll();
       }
     });
     this.addSettingTab(new RagflowSyncSettingTab(this.app, this));

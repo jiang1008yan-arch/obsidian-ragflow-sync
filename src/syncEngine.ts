@@ -13,6 +13,12 @@ import {
 	PROCESSING_VERSION,
 	type ApplyResult,
 } from "./syncApplyRun";
+import {
+	applyTagRun,
+	type TagApplyResult,
+	type TagTarget,
+} from "./applyTagRun";
+import { owningMapping } from "./mapping";
 import { ObsidianVaultAccess, type VaultAccess } from "./vaultAccess";
 import {
 	ChangeKind,
@@ -180,6 +186,34 @@ export class SyncEngine {
 			changes,
 			onProgress,
 			processingVersion: PROCESSING_VERSION,
+		});
+	}
+
+	/**
+	 * Every synced document as a tag target, paired with the mapping that owns its
+	 * path (needed only to find a companion note's tags for a non-markdown file).
+	 * This is the universe the Tags tab lists — the documents that have, or will
+	 * have, chunks.
+	 */
+	tagTargets(): TagTarget[] {
+		const scope = this.scope();
+		return Object.entries(this.store.allFiles()).map(([vaultPath, record]) => ({
+			vaultPath,
+			record,
+			mapping: owningMapping(vaultPath, scope),
+		}));
+	}
+
+	async applyTags(
+		targets: TagTarget[],
+		onProgress?: (done: number, total: number, label: string) => void
+	): Promise<TagApplyResult> {
+		return applyTagRun({
+			vault: this.vault,
+			client: this.client,
+			settings: this.getSettings(),
+			targets,
+			onProgress,
 		});
 	}
 }

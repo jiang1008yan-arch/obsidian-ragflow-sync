@@ -1,8 +1,13 @@
 import type { ChangeKind, FileChange } from "./types";
 import { diffVisible } from "./tree";
 
-export type PanelTab = "diff" | "sync";
+export type PanelTab = "diff" | "sync" | "tags";
 
+/**
+ * The diff-derived changes a tab shows. The Tags tab is not diff-derived — its
+ * list comes from Synced state, assembled by the view — so it is not handled
+ * here; only "diff" and "sync" consume the change list.
+ */
 export function tabData(tab: PanelTab, changes: FileChange[]): FileChange[] {
 	return tab === "diff"
 		? diffVisible(changes)
