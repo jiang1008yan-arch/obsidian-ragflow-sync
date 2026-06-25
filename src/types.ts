@@ -226,22 +226,7 @@ export interface RagflowDocument {
 	dataset_id?: string;
 	size?: number;
 	type?: string;
-	/** Parse status: UNSTART / RUNNING / DONE / FAIL. */
 	run?: string;
-	/** Number of chunks the parse produced; 0 until parsing completes. */
-	chunk_count?: number;
 	create_time?: number;
 	update_time?: number;
-}
-
-/**
- * One chunk of a parsed document, normalized from the RAGFlow Chunk API. Only
- * the fields the tag-application run needs: the id to address it, the content
- * (echoed back unchanged on update), and its current important_keywords so an
- * already-correct chunk can be skipped.
- */
-export interface RagflowChunk {
-	id: string;
-	content: string;
-	important_keywords: string[];
 }
