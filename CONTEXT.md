@@ -66,10 +66,6 @@ _Avoid_: load cleanup, settings fixup.
 The pure state rules behind the Scan diff / Sync panel tabs: which **Change kind**s are visible, which changes "Sync all" applies, and how selected or forced uploads are promoted.
 _Avoid_: view state, UI helper.
 
-**Chunk tagging**:
-A post-parse maintenance run that writes a note's `tags` frontmatter onto every chunk of its RAGFlow document as that chunk's `important_keywords`, to boost retrieval recall. Distinct from **Frontmatter metadata** (which is document-level `meta_fields`): tags here live on each chunk. Driven from the panel's third tab, "Tags", over **Synced state**; selection-aware (ticked documents, or all when none ticked). It is decoupled from sync — it never uploads or parses, only a fired-and-accepted parse produces the chunks it then tags. A document not yet parsed (`run` is not `DONE`, or zero chunks) is skipped and reported; a note with no tags is left untouched (no clearing). Tags replace a chunk's keywords wholesale, so all chunks of one note carry exactly that note's tags; an already-correct chunk is not rewritten. A non-markdown document inherits its **Companion metadata** note's tags.
-_Avoid_: keywording, chunk metadata, labeling.
-
 ## Relationships
 
 - A **Dataset mapping** defines part of what counts as **In-scope** and names the destination dataset.
@@ -85,7 +81,6 @@ _Avoid_: keywording, chunk metadata, labeling.
 - **Companion metadata** is built once per **Sync apply run** from the configured companion source folders and then queried for metadata-less uploads.
 - **Settings migration** runs after plugin data is loaded and before the plugin creates its RAGFlow client, **Synced state** store, and sync modules.
 - **Panel state** is consumed by the panel view so tab visibility and forced-upload rules can be tested without DOM rendering.
-- **Chunk tagging** runs after a document's parse has produced chunks; because a re-sync replaces the document and regenerates its chunks (dropping their keywords), tags must be re-applied after each re-sync — the panel reminds the user after an upload but never auto-applies.
 
 ## Example dialogue
 

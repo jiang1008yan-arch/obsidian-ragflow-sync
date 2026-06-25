@@ -1,35 +1,6 @@
 import { requestUrl, RequestUrlParam } from "obsidian";
 import { buildMultipart } from "./multipart";
-import {
-	RagflowChunk,
-	RagflowDataset,
-	RagflowDocument,
-	RagflowSyncSettings,
-} from "./types";
-
-/**
- * The raw chunk shape RAGFlow returns, normalized by normalizeChunk. Field names
- * have drifted across RAGFlow versions (`id`/`chunk_id`,
- * `content`/`content_with_weight`, `important_keywords`/`important_kwd`), so each
- * is accepted defensively.
- */
-interface RawChunk {
-	id?: string;
-	chunk_id?: string;
-	content?: string;
-	content_with_weight?: string;
-	important_keywords?: string[];
-	important_kwd?: string[];
-}
-
-/** Map a version-variant raw chunk into the stable RagflowChunk shape. */
-export function normalizeChunk(raw: RawChunk): RagflowChunk {
-	return {
-		id: raw.id ?? raw.chunk_id ?? "",
-		content: raw.content ?? raw.content_with_weight ?? "",
-		important_keywords: raw.important_keywords ?? raw.important_kwd ?? [],
-	};
-}
+import { RagflowDataset, RagflowDocument, RagflowSyncSettings } from "./types";
 
 // RAGFlow's list endpoints cap page_size; 100 is safe across datasets/documents.
 const PAGE_SIZE = 100;
@@ -289,79 +260,6 @@ export class RagflowClient {
 			method: "POST",
 			headers: this.headers({ "Content-Type": "application/json" }),
 			body: JSON.stringify({ document_ids: ids }),
-		});
-	}
-
-	/**
-	 * Parse status and chunk count of a single document, read from the dataset's
-	 * document list filtered by id. Returns undefined when the document is no
-	 * longer in the dataset. Used by the tag-application run to decide whether a
-	 * document is parsed (run === "DONE", chunk_count > 0) before tagging.
-	 */
-	async getDocumentStatus(
-		datasetId: string,
-		documentId: string
-	): Promise<{ run?: string; chunkCount: number } | undefined> {
-		const data = await this.send<{ docs?: RagflowDocument[] }>({
-			url: `${this.base()}/datasets/${datasetId}/documents${this.query({
-				id: documentId,
-				page: 1,
-				page_size: 1,
-			})}`,
-			method: "GET",
-			headers: this.headers(),
-		});
-		const doc = data?.docs?.[0];
-		if (!doc) return undefined;
-		return { run: doc.run, chunkCount: doc.chunk_count ?? 0 };
-	}
-
-	/**
-	 * Every chunk of a parsed document, paginating fully. Chunks only exist after
-	 * parsing completes; an unparsed document returns an empty list. Normalized to
-	 * RagflowChunk so callers see a stable shape across RAGFlow versions.
-	 */
-	async listChunks(
-		datasetId: string,
-		documentId: string
-	): Promise<RagflowChunk[]> {
-		const all: RagflowChunk[] = [];
-		let page = 1;
-		// eslint-disable-next-line no-constant-condition
-		while (true) {
-			const data = await this.send<{ chunks?: RawChunk[] }>({
-				url: `${this.base()}/datasets/${datasetId}/documents/${documentId}/chunks${this.query(
-					{ page, page_size: PAGE_SIZE }
-				)}`,
-				method: "GET",
-				headers: this.headers(),
-			});
-			const chunks = data?.chunks ?? [];
-			for (const c of chunks) all.push(normalizeChunk(c));
-			if (chunks.length < PAGE_SIZE) break;
-			page += 1;
-		}
-		return all;
-	}
-
-	/**
-	 * Replace one chunk's important_keywords. The chunk's content is echoed back
-	 * unchanged because RAGFlow's Update-chunk endpoint can require it alongside
-	 * the keywords; sending the same content is a no-op for the body but keeps the
-	 * call valid across versions.
-	 */
-	async updateChunkKeywords(
-		datasetId: string,
-		documentId: string,
-		chunkId: string,
-		keywords: string[],
-		content: string
-	): Promise<void> {
-		await this.send({
-			url: `${this.base()}/datasets/${datasetId}/documents/${documentId}/chunks/${chunkId}`,
-			method: "PUT",
-			headers: this.headers({ "Content-Type": "application/json" }),
-			body: JSON.stringify({ content, important_keywords: keywords }),
 		});
 	}
 

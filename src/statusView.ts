@@ -2,7 +2,6 @@ import { ItemView, Notice, WorkspaceLeaf } from "obsidian";
 import type RagflowSyncPlugin from "./main";
 import { ChangeKind, FileChange } from "./types";
 import { summarize } from "./syncEngine";
-import type { TagTarget } from "./applyTagRun";
 import {
 	forceAllChanges,
 	forceSelectedChanges,
@@ -12,7 +11,6 @@ import {
 	type PanelTab,
 } from "./panelState";
 import {
-	allFolderPaths,
 	buildTree,
 	changeSummary,
 	foldersWithChanges,
@@ -35,10 +33,6 @@ export class RagflowSyncView extends ItemView {
 	plugin: RagflowSyncPlugin;
 	/** The full diff: every in-scope file (all kinds) plus deletions. */
 	private changes: FileChange[] = [];
-	/** Tags tab universe: every synced document, with its owning mapping. */
-	private tagTargets: TagTarget[] = [];
-	/** Tags tab tree data: tagTargets as badge-free leaves for the folder tree. */
-	private tagChanges: FileChange[] = [];
 	private statusEl: HTMLElement | null = null;
 	private busy = false;
 	/** Which tab is showing: the Scan-diff list or the full Sync picker. */
@@ -50,7 +44,6 @@ export class RagflowSyncView extends ItemView {
 	/** Selection-dependent buttons, kept so their labels can update live. */
 	private syncSelectedBtn: HTMLButtonElement | null = null;
 	private ignoreSelectedBtn: HTMLButtonElement | null = null;
-	private applyTagsBtn: HTMLButtonElement | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: RagflowSyncPlugin) {
 		super(leaf);
@@ -166,17 +159,6 @@ export class RagflowSyncView extends ItemView {
 			if (result.errors.length > 0) {
 				console.error("RAGFlow Sync errors:", result.errors);
 			}
-			// Re-uploading replaces a document and its chunks, dropping any chunk
-			// tags. Nudge the user to re-apply them once parsing settles — but never
-			// auto-apply; tagging stays a separate, user-triggered step.
-			const uploads = actionable.filter(
-				(c) => c.kind === "new" || c.kind === "modified"
-			).length;
-			if (uploads > 0) {
-				new Notice(
-					"Re-apply tags from the Tags tab once parsing finishes."
-				);
-			}
 		} catch (e) {
 			new Notice(`Sync failed: ${(e as Error).message}`);
 		} finally {
@@ -210,87 +192,9 @@ export class RagflowSyncView extends ItemView {
 		new Notice(`Ignoring ${picked.length} file(s).`);
 	}
 
-	/**
-	 * Rebuild the Tags tab list from Synced state. Cheap (reads in-memory state),
-	 * so it runs on every entry to the tab to stay fresh after a sync. Each synced
-	 * document becomes a badge-free "unchanged" leaf for the shared folder tree.
-	 */
-	private loadTagTargets(): void {
-		this.tagTargets = this.plugin.engine.tagTargets();
-		this.tagChanges = this.tagTargets.map((t) => ({
-			kind: "unchanged" as ChangeKind,
-			vaultPath: t.vaultPath,
-			record: t.record,
-		}));
-		// Tag rows are all "unchanged", which foldersWithChanges would hide, so
-		// expand every folder holding a synced document to reveal the files.
-		this.expanded = allFolderPaths(this.tagChanges);
-	}
-
-	/**
-	 * Apply each note's tags to its document's chunks. Selection-aware: ticked
-	 * files are tagged; with nothing ticked, every synced document is. Documents
-	 * not parsed yet (or notes without tags) are skipped and reported.
-	 */
-	async applyTags(): Promise<void> {
-		if (this.busy) return;
-		if (this.tagTargets.length === 0) {
-			new Notice("Nothing synced to tag yet.");
-			return;
-		}
-		const targets =
-			this.selected.size > 0
-				? this.tagTargets.filter((t) => this.selected.has(t.vaultPath))
-				: this.tagTargets;
-		if (targets.length === 0) {
-			new Notice("Tick files to tag, or untick all to tag everything.");
-			return;
-		}
-		this.busy = true;
-		this.setStatus(`Tagging ${targets.length} document(s)...`);
-		try {
-			const result = await this.plugin.engine.applyTags(
-				targets,
-				(done, total, label) => {
-					this.setStatus(`Tagging ${done}/${total}: ${label}`);
-				}
-			);
-			let msg = `Tagged ${result.tagged} document(s), ${result.chunksWritten} chunk(s) updated.`;
-			if (result.skippedUnparsed > 0) {
-				msg += ` ${result.skippedUnparsed} not parsed yet.`;
-			}
-			if (result.skippedNoTags > 0) msg += ` ${result.skippedNoTags} without tags.`;
-			if (result.failed > 0) msg += ` ${result.failed} failed.`;
-			new Notice(msg);
-			this.setStatus(msg);
-			if (result.errors.length > 0) {
-				console.error("RAGFlow Sync tag errors:", result.errors);
-			}
-		} catch (e) {
-			new Notice(`Tagging failed: ${(e as Error).message}`);
-			this.setStatus(`Tagging failed: ${(e as Error).message}`);
-		} finally {
-			this.busy = false;
-		}
-	}
-
-	/**
-	 * Switch to the Tags tab and tag every synced document. The command-palette
-	 * entry point; the panel button offers selection-scoped tagging instead.
-	 */
-	async applyTagsAll(): Promise<void> {
-		this.activeTab = "tags";
-		this.selected.clear();
-		this.loadTagTargets();
-		this.render();
-		await this.applyTags();
-	}
-
 	/** The change list backing the active tab. */
 	private tabData(): FileChange[] {
-		return this.activeTab === "tags"
-			? this.tagChanges
-			: tabData(this.activeTab, this.changes);
+		return tabData(this.activeTab, this.changes);
 	}
 
 	private render(): void {
@@ -300,7 +204,6 @@ export class RagflowSyncView extends ItemView {
 
 		this.syncSelectedBtn = null;
 		this.ignoreSelectedBtn = null;
-		this.applyTagsBtn = null;
 
 		this.renderTabs(container.createDiv({ cls: "ragflow-sync-tabs" }));
 
@@ -310,10 +213,18 @@ export class RagflowSyncView extends ItemView {
 		this.statusEl = container.createDiv({ cls: "ragflow-sync-status" });
 
 		const data = this.tabData();
-		if (data.length === 0) {
+		if (this.changes.length === 0) {
 			container.createDiv({
 				cls: "ragflow-sync-empty",
-				text: this.emptyMessage(),
+				text: 'No scan results yet. Click "Scan diff" to compare your vault with RAGFlow.',
+			});
+		} else if (data.length === 0) {
+			container.createDiv({
+				cls: "ragflow-sync-empty",
+				text:
+					this.activeTab === "diff"
+						? "Everything is up to date."
+						: "No in-scope files to show.",
 			});
 		} else {
 			const tree = container.createDiv({ cls: "ragflow-sync-tree" });
@@ -323,20 +234,7 @@ export class RagflowSyncView extends ItemView {
 		this.updateSelectionUi();
 	}
 
-	/** The empty-state line for the active tab when it has nothing to show. */
-	private emptyMessage(): string {
-		if (this.activeTab === "tags") {
-			return "No synced documents yet. Sync files first, then apply tags.";
-		}
-		if (this.changes.length === 0) {
-			return 'No scan results yet. Click "Scan diff" to compare your vault with RAGFlow.';
-		}
-		return this.activeTab === "diff"
-			? "Everything is up to date."
-			: "No in-scope files to show.";
-	}
-
-	/** The Scan diff / Sync / Tags segmented toggle. */
+	/** The Scan diff / Sync segmented toggle. */
 	private renderTabs(bar: HTMLElement): void {
 		const tab = (id: PanelTab, label: string) => {
 			const btn = bar.createEl("button", { text: label });
@@ -345,9 +243,6 @@ export class RagflowSyncView extends ItemView {
 				if (this.activeTab === id) return;
 				this.activeTab = id;
 				this.selected.clear();
-				// The Tags tab lists Synced state, not a scan; (re)load it on entry so
-				// it reflects documents synced since the panel opened.
-				if (id === "tags") this.loadTagTargets();
 				this.render();
 				// The Sync picker has no scan button of its own; load the file list
 				// on first visit so it isn't an empty tab with no way to populate it.
@@ -356,7 +251,6 @@ export class RagflowSyncView extends ItemView {
 		};
 		tab("diff", "Scan diff");
 		tab("sync", "Sync");
-		tab("tags", "Tags");
 	}
 
 	private renderToolbar(toolbar: HTMLElement): void {
@@ -377,18 +271,12 @@ export class RagflowSyncView extends ItemView {
 				text: "Ignore selected",
 			});
 			this.ignoreSelectedBtn.onclick = () => void this.ignoreSelected();
-		} else if (this.activeTab === "sync") {
+		} else {
 			this.syncSelectedBtn = toolbar.createEl("button", {
 				text: "Sync selected",
 			});
 			this.syncSelectedBtn.addClass("mod-cta");
 			this.syncSelectedBtn.onclick = () => void this.syncSelected();
-		} else {
-			this.applyTagsBtn = toolbar.createEl("button", {
-				text: "Apply tags",
-			});
-			this.applyTagsBtn.addClass("mod-cta");
-			this.applyTagsBtn.onclick = () => void this.applyTags();
 		}
 	}
 
@@ -507,13 +395,6 @@ export class RagflowSyncView extends ItemView {
 				n > 0 ? `Ignore selected (${n})` : "Ignore selected"
 			);
 			this.ignoreSelectedBtn.disabled = n === 0;
-		}
-		if (this.applyTagsBtn) {
-			// Selection-aware: tick files to tag those, or none to tag every
-			// synced document.
-			this.applyTagsBtn.setText(
-				n > 0 ? `Apply tags (${n})` : "Apply tags (all)"
-			);
 		}
 	}
 }
