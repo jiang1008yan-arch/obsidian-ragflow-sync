@@ -1,6 +1,6 @@
 import { ItemView, Notice, WorkspaceLeaf } from "obsidian";
 import type RagflowSyncPlugin from "./main";
-import { ChangeKind, FileChange } from "./types";
+import { ChangeKind, FileChange, RemoteOrphan } from "./types";
 import { summarize } from "./syncEngine";
 import {
 	forceAllChanges,
@@ -27,23 +27,33 @@ const KIND_LABEL: Record<ChangeKind, string> = {
 	modified: "Modified",
 	deleted: "Deleted",
 	unchanged: "Up to date",
+	missing: "Missing in RAGFlow",
 };
 
 export class RagflowSyncView extends ItemView {
 	plugin: RagflowSyncPlugin;
 	/** The full diff: every in-scope file (all kinds) plus deletions. */
 	private changes: FileChange[] = [];
+	/** RAGFlow documents nothing in the vault accounts for; empty until a reconcile. */
+	private orphans: RemoteOrphan[] = [];
+	/** Per-dataset "remote N / tracked M" lines from the last reconcile. */
+	private countLines: string[] = [];
 	private statusEl: HTMLElement | null = null;
+	/** Whether a scan has completed, as distinct from having found changes. */
+	private scanned = false;
 	private busy = false;
 	/** Which tab is showing: the Scan-diff list or the full Sync picker. */
 	private activeTab: PanelTab = "diff";
 	/** Vault paths ticked in the current tab. Reset when the tab changes. */
 	private selected: Set<string> = new Set();
+	/** Orphan document ids ticked for deletion. Reset by every scan/reconcile. */
+	private selectedOrphans: Set<string> = new Set();
 	/** Folder paths currently expanded in the tree. */
 	private expanded: Set<string> = new Set();
 	/** Selection-dependent buttons, kept so their labels can update live. */
 	private syncSelectedBtn: HTMLButtonElement | null = null;
 	private ignoreSelectedBtn: HTMLButtonElement | null = null;
+	private deleteOrphansBtn: HTMLButtonElement | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: RagflowSyncPlugin) {
 		super(leaf);
@@ -85,9 +95,13 @@ export class RagflowSyncView extends ItemView {
 		try {
 			const result = await this.plugin.engine.computeDiff();
 			this.changes = result.changes;
+			this.scanned = true;
 			// A fresh scan is a clean slate: drop any prior selection and expand the
-			// folders that hold visible entries so they are visible at a glance.
+			// folders that hold visible entries so they are visible at a glance. The
+			// previous reconcile result is discarded with it — these changes were
+			// classified without consulting RAGFlow, so its findings no longer apply.
 			this.selected.clear();
+			this.clearReconcile();
 			this.expanded = foldersWithChanges(this.changes);
 			if (result.missingMappings.length > 0) {
 				new Notice(
@@ -104,6 +118,104 @@ export class RagflowSyncView extends ItemView {
 		} catch (e) {
 			new Notice(`Scan failed: ${(e as Error).message}`);
 			this.setStatus(`Scan failed: ${(e as Error).message}`);
+		} finally {
+			this.busy = false;
+		}
+	}
+
+	private clearReconcile(): void {
+		this.orphans = [];
+		this.countLines = [];
+		this.selectedOrphans.clear();
+	}
+
+	/**
+	 * Remote reconcile: ask RAGFlow what it actually holds and fold the answer
+	 * into the current scan. A plain scan compares the vault with the local
+	 * synced state only, so drift on the RAGFlow side — documents uploaded
+	 * outside the plugin, leftovers from a lost synced state, "name(n).ext"
+	 * duplicates, documents deleted in the RAGFlow UI — is invisible to it and
+	 * only shows up here.
+	 */
+	async reconcile(): Promise<void> {
+		if (this.busy) return;
+		if (!this.plugin.settings.apiKey) {
+			new Notice("Set your RAGFlow API key in settings first.");
+			return;
+		}
+		// Gate on "has a scan run", not "did it find anything": a vault with no
+		// in-scope files at all is precisely when a dataset full of orphans matters.
+		if (!this.scanned) await this.scan();
+		if (!this.scanned) return;
+
+		this.busy = true;
+		this.setStatus("Reconciling with RAGFlow...");
+		try {
+			const result = await this.plugin.engine.reconcile(this.changes, (label) =>
+				this.setStatus(label)
+			);
+			this.changes = result.changes;
+			this.orphans = result.orphans;
+			this.selectedOrphans.clear();
+			this.countLines = result.counts.map(
+				(c) => `${c.datasetName}: ${c.remote} in RAGFlow / ${c.tracked} tracked`
+			);
+			await this.plugin.saveSettings();
+			this.expanded = foldersWithChanges(this.changes);
+			this.render();
+
+			const missing = summarize(this.changes).missing;
+			const parts = [`${this.orphans.length} orphaned document(s) in RAGFlow`];
+			if (missing > 0) parts.push(`${missing} file(s) missing from RAGFlow`);
+			if (result.absentDatasets.length > 0) {
+				parts.push(`dataset(s) not found: ${result.absentDatasets.join(", ")}`);
+			}
+			this.setStatus(`Reconcile complete: ${parts.join(", ")}.`);
+		} catch (e) {
+			new Notice(`Reconcile failed: ${(e as Error).message}`);
+			this.setStatus(`Reconcile failed: ${(e as Error).message}`);
+		} finally {
+			this.busy = false;
+		}
+	}
+
+	/**
+	 * Delete the ticked orphans from RAGFlow. Deliberately its own action rather
+	 * than part of "Sync all": a mapped dataset may legitimately hold documents
+	 * that did not come from this vault, and those must not be swept away by the
+	 * ordinary sync button.
+	 */
+	async deleteSelectedOrphans(): Promise<void> {
+		if (this.busy) return;
+		const picked = this.orphans.filter((o) =>
+			this.selectedOrphans.has(o.documentId)
+		);
+		if (picked.length === 0) {
+			new Notice("Tick the orphaned documents you want to delete.");
+			return;
+		}
+		this.busy = true;
+		try {
+			const result = await this.plugin.engine.deleteOrphans(
+				picked,
+				(done, total, label) => this.setStatus(`${label} ${done}/${total}`)
+			);
+			let msg = `Deleted ${result.ok} orphaned document(s).`;
+			if (result.failed > 0) msg += ` ${result.failed} failed.`;
+			new Notice(msg);
+			if (result.errors.length > 0) {
+				console.error("RAGFlow Sync orphan delete errors:", result.errors);
+			}
+			// Drop what RAGFlow accepted; anything that failed stays listed to retry.
+			const gone = new Set(result.deletedIds);
+			this.orphans = this.orphans.filter((o) => !gone.has(o.documentId));
+			// The per-dataset tallies counted the documents we just removed.
+			this.countLines = [];
+			this.selectedOrphans.clear();
+			this.render();
+			this.setStatus(msg);
+		} catch (e) {
+			new Notice(`Delete failed: ${(e as Error).message}`);
 		} finally {
 			this.busy = false;
 		}
@@ -204,6 +316,7 @@ export class RagflowSyncView extends ItemView {
 
 		this.syncSelectedBtn = null;
 		this.ignoreSelectedBtn = null;
+		this.deleteOrphansBtn = null;
 
 		this.renderTabs(container.createDiv({ cls: "ragflow-sync-tabs" }));
 
@@ -211,6 +324,11 @@ export class RagflowSyncView extends ItemView {
 		this.renderToolbar(toolbar);
 
 		this.statusEl = container.createDiv({ cls: "ragflow-sync-status" });
+
+		if (this.activeTab === "diff") {
+			this.renderCounts(container);
+			this.renderOrphans(container);
+		}
 
 		const data = this.tabData();
 		if (this.changes.length === 0) {
@@ -258,6 +376,13 @@ export class RagflowSyncView extends ItemView {
 			const scanBtn = toolbar.createEl("button", { text: "Scan diff" });
 			scanBtn.onclick = () => void this.scan();
 
+			const reconcileBtn = toolbar.createEl("button", { text: "Reconcile" });
+			reconcileBtn.title =
+				"Compare against the documents actually in RAGFlow. A scan only " +
+				"compares your vault with the plugin's local record, so documents " +
+				"added or deleted on the RAGFlow side never show up in it.";
+			reconcileBtn.onclick = () => void this.reconcile();
+
 			this.syncSelectedBtn = toolbar.createEl("button", {
 				text: "Sync selected",
 			});
@@ -277,6 +402,68 @@ export class RagflowSyncView extends ItemView {
 			});
 			this.syncSelectedBtn.addClass("mod-cta");
 			this.syncSelectedBtn.onclick = () => void this.syncSelected();
+		}
+	}
+
+	/** The per-dataset "remote N / tracked M" tallies from the last reconcile. */
+	private renderCounts(container: HTMLElement): void {
+		if (this.countLines.length === 0) return;
+		const box = container.createDiv({ cls: "ragflow-sync-counts" });
+		for (const line of this.countLines) {
+			box.createDiv({ cls: "ragflow-sync-count-line", text: line });
+		}
+	}
+
+	/**
+	 * Orphaned RAGFlow documents, listed outside the file tree because they have
+	 * no vault path to hang under — they exist only on the RAGFlow side.
+	 */
+	private renderOrphans(container: HTMLElement): void {
+		if (this.orphans.length === 0) return;
+
+		const section = container.createDiv({ cls: "ragflow-sync-orphans" });
+		const header = section.createDiv({ cls: "ragflow-sync-orphans-header" });
+
+		const all = header.createEl("input", { type: "checkbox" });
+		all.checked = this.selectedOrphans.size === this.orphans.length;
+		all.indeterminate =
+			this.selectedOrphans.size > 0 &&
+			this.selectedOrphans.size < this.orphans.length;
+		all.onchange = () => {
+			this.selectedOrphans.clear();
+			if (all.checked) {
+				for (const o of this.orphans) this.selectedOrphans.add(o.documentId);
+			}
+			this.render();
+		};
+
+		header.createDiv({
+			cls: "ragflow-tree-name",
+			text: `In RAGFlow only (${this.orphans.length})`,
+		});
+
+		this.deleteOrphansBtn = header.createEl("button", {
+			text: "Delete from RAGFlow",
+		});
+		this.deleteOrphansBtn.addClass("mod-warning");
+		this.deleteOrphansBtn.onclick = () => void this.deleteSelectedOrphans();
+
+		for (const orphan of this.orphans) {
+			const row = section.createDiv({
+				cls: "ragflow-tree-row ragflow-tree-file",
+			});
+			const box = row.createEl("input", { type: "checkbox" });
+			box.checked = this.selectedOrphans.has(orphan.documentId);
+			box.onchange = () => {
+				if (box.checked) this.selectedOrphans.add(orphan.documentId);
+				else this.selectedOrphans.delete(orphan.documentId);
+				this.render();
+			};
+			row.createDiv({ cls: "ragflow-tree-name", text: orphan.documentName });
+			row.createSpan({
+				cls: "ragflow-tree-count",
+				text: orphan.datasetName,
+			});
 		}
 	}
 
@@ -395,6 +582,15 @@ export class RagflowSyncView extends ItemView {
 				n > 0 ? `Ignore selected (${n})` : "Ignore selected"
 			);
 			this.ignoreSelectedBtn.disabled = n === 0;
+		}
+		if (this.deleteOrphansBtn) {
+			const picked = this.selectedOrphans.size;
+			this.deleteOrphansBtn.setText(
+				picked > 0
+					? `Delete ${picked} from RAGFlow`
+					: "Delete from RAGFlow"
+			);
+			this.deleteOrphansBtn.disabled = picked === 0;
 		}
 	}
 }

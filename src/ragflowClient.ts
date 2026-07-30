@@ -169,6 +169,50 @@ export class RagflowClient {
 	}
 
 	/**
+	 * Resolve a dataset id by name *without* creating it. Returns undefined when
+	 * no such dataset exists — the Remote reconcile needs to look at what RAGFlow
+	 * actually holds, and must not conjure an empty dataset just by asking.
+	 */
+	async findDatasetId(name: string): Promise<string | undefined> {
+		const trimmed = name.trim();
+		if (!trimmed) return undefined;
+		const cached = this.datasetIdByName.get(trimmed);
+		if (cached) return cached;
+
+		const found = (await this.listDatasets()).find((d) => d.name === trimmed);
+		if (!found) return undefined;
+		this.datasetIdByName.set(trimmed, found.id);
+		return found.id;
+	}
+
+	/**
+	 * Every document in a dataset, paginating fully. This is the only call that
+	 * reads RAGFlow's actual contents wholesale; it backs the Remote reconcile,
+	 * which is why it is deliberately not on the ordinary scan path (a dataset of
+	 * N documents costs ceil(N/100) requests).
+	 */
+	async listDocuments(datasetId: string): Promise<RagflowDocument[]> {
+		const all: RagflowDocument[] = [];
+		let page = 1;
+		// eslint-disable-next-line no-constant-condition
+		while (true) {
+			const data = await this.send<{ docs?: RagflowDocument[] }>({
+				url: `${this.base()}/datasets/${datasetId}/documents${this.query({
+					page,
+					page_size: PAGE_SIZE,
+				})}`,
+				method: "GET",
+				headers: this.headers(),
+			});
+			const docs = data?.docs ?? [];
+			all.push(...docs);
+			if (docs.length < PAGE_SIZE) break;
+			page += 1;
+		}
+		return all;
+	}
+
+	/**
 	 * Ids of documents in a dataset whose name collides with `name` — the name
 	 * itself plus any RAGFlow "(n)" duplicate of it (see isDuplicateName). Used to
 	 * clear existing copies before a re-upload so the new file replaces them

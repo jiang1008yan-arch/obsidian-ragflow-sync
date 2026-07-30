@@ -69,6 +69,7 @@ export function changeSummary(leaves: TreeNode[]): string {
 		modified: 0,
 		deleted: 0,
 		unchanged: 0,
+		missing: 0,
 	};
 	let ignored = 0;
 	for (const leaf of leaves) {
@@ -80,16 +81,17 @@ export function changeSummary(leaves: TreeNode[]): string {
 	if (counts.new) parts.push(`${counts.new} new`);
 	if (counts.modified) parts.push(`${counts.modified} modified`);
 	if (counts.deleted) parts.push(`${counts.deleted} deleted`);
+	if (counts.missing) parts.push(`${counts.missing} missing`);
 	if (ignored) parts.push(`${ignored} ignored`);
 	return parts.join(", ");
 }
 
 /**
- * The changes the Scan diff tab shows: only the three actionable states
- * New / Modified / Deleted. Up-to-date files and snoozed (ignored) files are
- * left out to keep the list uncluttered — ignored files stay tracked in the
- * background and re-surface once they drift. The Sync tab uses the full list
- * instead so any file can be picked for a manual upload.
+ * The changes the Scan diff tab shows: the actionable states New / Modified /
+ * Deleted, plus Missing once a Remote reconcile has run. Up-to-date files and
+ * snoozed (ignored) files are left out to keep the list uncluttered — ignored
+ * files stay tracked in the background and re-surface once they drift. The Sync
+ * tab uses the full list instead so any file can be picked for a manual upload.
  */
 export function diffVisible(changes: FileChange[]): FileChange[] {
 	return changes.filter((c) => c.kind !== "unchanged" && !c.ignored);

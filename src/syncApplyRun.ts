@@ -101,7 +101,9 @@ class SyncApplyRun {
 		try {
 			for (const change of actionable) {
 				try {
-					if (change.kind === "new") {
+					if (change.kind === "new" || change.kind === "missing") {
+						// "missing" means a reconcile found the tracked document gone from
+						// RAGFlow, so there is nothing to delete first: upload as if new.
 						const up = await this.syncUpload(change, undefined, companionIndex);
 						this.recordUpload(uploaded, up);
 						if (up.error) throw up.error;
