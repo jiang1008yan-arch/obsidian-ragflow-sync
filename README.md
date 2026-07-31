@@ -304,14 +304,19 @@ There are three ways to open or run sync actions:
 
 - Click the `RAGFlow Sync` ribbon icon.
 - Run `RAGFlow Sync: Open sync panel` from the command palette.
-- Run `RAGFlow Sync: Scan for differences`, `RAGFlow Sync: Sync all changes`, or
-  `RAGFlow Sync: Reconcile with RAGFlow` from the command palette.
+- Run `RAGFlow Sync: Scan (vault and RAGFlow)` or `RAGFlow Sync: Sync all
+  changes` from the command palette.
 
 ### Recommended Workflow
 
 1. Open the `RAGFlow Sync` panel.
 
-2. Click `Scan diff`.
+2. Click `Scan`. One scan does both halves of the comparison: what changed in
+   your vault, and what the mapped RAGFlow datasets actually hold. It takes a
+   moment longer than a purely local check — about one request per hundred
+   documents — and it is what makes a mismatched document count visible instead
+   of silent. If RAGFlow cannot be reached, the local half is still shown, with
+   a warning saying so.
 
 3. Review the result. The diff is shown as your vault's folder tree: each folder
    can be expanded or collapsed, folders that contain changes are expanded for
@@ -323,12 +328,18 @@ There are three ways to open or run sync actions:
    - `Deleted`: files that were synced before but no longer exist locally.
    - `Up to date`: files that match the last synced state.
    - `Missing in RAGFlow`: files that look up to date locally but whose document
-     is gone from the dataset. Only a `Reconcile` can find these (see below).
+     is gone from the dataset.
+
+   Above the tree, a `In RAGFlow only (N)` section lists documents that exist in
+   a dataset but match nothing in your vault, each with a checkbox so you can
+   delete the ones you do not want. Above that, one line per dataset gives the
+   three counts that matter — see below.
 
    Use `Expand all` / `Collapse all` to change how much of the tree is open.
 
-4. Click `Sync all` to apply every change at once, or tick specific files and
-   folders and click `Sync selected (N)` to act on just those (see below).
+4. Click the sync button. Its label always names exactly what it will do: with
+   nothing ticked it reads `Sync all (N)` and applies every change; tick some
+   files or folders and it becomes `Sync selected (N)` and applies only those.
 
 5. Wait for the final notice. The panel scans again after syncing so the latest
    state is visible.
@@ -340,7 +351,7 @@ not changed is left alone. But when a plugin update changes how documents are
 *processed* on upload (for example, the metadata wikilink cleaning), the source
 is identical yet the uploaded result should change. To handle this the plugin
 tracks a processing version on every synced document: after an update that bumps
-it, your already-synced notes show up as `Modified` on the next `Scan diff` and
+it, your already-synced notes show up as `Modified` on the next scan and
 re-upload once with the new processing — no manual action needed.
 
 If you ever need to rebuild RAGFlow's copies without any change to trigger it
@@ -353,16 +364,16 @@ Selected `Up to date` files are re-uploaded as if modified; nothing else is
 touched, so you rebuild only the documents you choose instead of re-uploading
 the entire vault.
 
-To rebuild *everything* regardless of the diff result, run
-`RAGFlow Sync: Force re-sync all` from the command palette.
+To rebuild *everything* regardless of the diff result, open the `▾` menu on the
+sync button and choose `Force re-upload every file…`. It confirms first, with a
+count: RAGFlow re-parses every document it receives, so on a large vault this is
+a much bigger job than the button it sits next to. It is also available as
+`RAGFlow Sync: Force re-sync all` in the command palette.
 
 ### When The Document Counts Do Not Match
 
-`Scan diff` compares your vault against the plugin's **local** record of what it
-uploaded. It never asks RAGFlow what is actually in the dataset. That keeps a
-scan fast and offline, but it means drift on the RAGFlow side is invisible to
-it — the dataset and your vault can hold different numbers of documents while
-the scan cheerfully reports everything up to date. That happens when:
+Every scan reads what each mapped dataset actually holds, so a mismatch shows up
+on its own. The counts drift apart when:
 
 - documents were uploaded to the dataset by something other than this plugin
   (the RAGFlow UI, another vault, another machine);
@@ -375,56 +386,54 @@ the scan cheerfully reports everything up to date. That happens when:
 - a deletion was ignored — the local file is gone but its document is kept on
   purpose (that is what ignoring a `Deleted` entry means).
 
-Click `Reconcile` to close that gap. It lists every document actually in each
-mapped dataset and cross-references it with your vault, then reports:
+The scan reports three things for this.
 
-- a `datasetname: 128 in RAGFlow / 120 tracked / 135 in vault` line per dataset,
-  plus a plain-language note under it for every gap. The three numbers answer
-  different questions and routinely disagree:
-  - **in RAGFlow** — documents actually in the dataset right now.
-  - **tracked** — documents the plugin's local record says it uploaded. Fewer
-    documents in RAGFlow than tracked means RAGFlow lost them.
-  - **in vault** — in-scope files routed to this dataset. More files in the
-    vault than tracked means they were never uploaded (they show as `New`).
+**A line per dataset**, `datasetname: 128 in RAGFlow / 120 tracked / 135 in
+vault`, with a plain-language note under it for every gap. The three numbers
+answer different questions and routinely disagree:
 
-  Note that "in vault" counts only files the plugin manages. If a mapped folder
-  holds far more files than that, the note tells you how many the extension and
-  exclude settings skip — those are never synced and never counted anywhere
-  else. A separate note appears when two files in different subfolders share a
-  filename: datasets are flat and uploads replace by name, so such a pair
-  overwrites itself and caps how many documents the dataset can ever hold.
-- an **In RAGFlow only (N)** section listing documents nothing in your vault
-  accounts for. Tick the ones you want gone and click `Delete N from RAGFlow`.
-  This is a separate button from `Sync all` on purpose: a dataset may
-  legitimately hold documents that did not come from this vault, so the ordinary
-  sync never touches them.
-- files badged `Missing in RAGFlow`, whose document vanished remotely. They are
-  ordinary changes from there on, so `Sync all` or `Sync selected (N)` re-uploads
-  them. A file that was ignored re-surfaces if its document is missing — a
-  snooze says "this file is fine as it is", which stops being true once its
-  document is gone.
+- **in RAGFlow** — documents actually in the dataset right now.
+- **tracked** — documents the plugin's local record says it uploaded. Fewer
+  documents in RAGFlow than tracked means RAGFlow lost them.
+- **in vault** — in-scope files routed to this dataset. More files in the vault
+  than tracked means they were never uploaded (they show as `New`).
 
-Reconcile reads every document in every mapped dataset, so it costs one request
-per 100 documents and is not run as part of a normal scan. Run it when the
-counts look wrong, after restoring plugin data, or after editing a dataset by
-hand in RAGFlow. It is also available as
-`RAGFlow Sync: Reconcile with RAGFlow` in the command palette. Note that syncing
-re-scans the vault afterwards, which clears the reconcile result — run
-`Reconcile` again if you want a fresh picture.
+"In vault" counts only files the plugin manages. If a mapped folder holds far
+more files than that, the note tells you how many the extension and exclude
+settings skip — those are never synced and never counted anywhere else. A
+separate note appears when two files in different subfolders share a filename:
+datasets are flat and uploads replace by name, so such a pair overwrites itself
+and caps how many documents the dataset can ever hold.
+
+**An `In RAGFlow only (N)` section** listing documents nothing in your vault
+accounts for. Tick the ones you want gone and click `Delete N from RAGFlow`.
+This is deliberately its own button rather than part of the sync: a dataset may
+legitimately hold documents that did not come from this vault, so the ordinary
+sync never touches them.
+
+**Files badged `Missing in RAGFlow`**, whose document vanished remotely. They
+are ordinary changes from there on, so the sync button re-uploads them. A file
+that was ignored re-surfaces if its document is missing — a snooze says "this
+file is fine as it is", which stops being true once its document is gone.
+
+If RAGFlow cannot be reached, the scan still reports the local half and shows a
+warning that the remote side was not checked, so nothing silently claims to be
+up to date on evidence it does not have.
 
 ### Mirroring A Folder Into RAGFlow
 
-`Reconcile` reports; `Mirror` acts. Click `Mirror` to make every mapped dataset
-match its source folder exactly, in one step:
+A scan reports; `Mirror` acts. Click the `▾` caret on the sync button and choose
+`Mirror: make RAGFlow match my folders…` to make every mapped dataset match its
+source folder exactly, in one step:
 
 - a document the folder does not account for is **deleted**;
 - a file the dataset does not hold is **uploaded**;
 - a name present on both sides is **left alone** (unless its content changed,
   in which case it re-uploads).
 
-The important difference from a scan or a reconcile is what it trusts. Those two
-reason through the plugin's local record of what it uploaded, so a lost or stale
-record misleads them. A mirror compares **filenames** — the set of in-scope files
+The important difference from a scan is what it trusts. A scan reasons through
+the plugin's local record of what it uploaded, so a lost or stale record
+misleads it. A mirror compares **filenames** — the set of in-scope files
 routed to a dataset against the set of documents actually in it — and lets that
 decide. That makes it the recovery path when the local record cannot be trusted
 at all: after restoring plugin data, moving to a new machine, or any time the
@@ -440,19 +449,23 @@ will upload, how many documents it will delete, how many it will leave alone.
 Two warnings worth reading before you confirm:
 
 - **Deletions are not reversible.** If a mapped dataset holds documents that
-  legitimately did not come from this vault, a mirror deletes them. Use
-  `Reconcile` and the per-document `In RAGFlow only` list instead when you want
-  to choose case by case.
+  legitimately did not come from this vault, a mirror deletes them. Use the
+  per-document `In RAGFlow only` list from an ordinary scan instead when you
+  want to choose case by case.
 - **Snoozed files are included.** Ignoring a file says "leave this one alone",
   which cannot survive an instruction to make the dataset match the folder.
 
-It is also available as `RAGFlow Sync: Mirror vault to RAGFlow` in the command
+It sits in the sync button's menu rather than on the toolbar itself: it belongs
+next to Sync because it is a variation on it, but it deletes in bulk, so the
+extra click keeps it clear of a mis-aimed click on the everyday button. It is
+also available as `RAGFlow Sync: Mirror vault to RAGFlow` in the command
 palette.
 
 ### Ignoring Files
 
 To stop specific files from ever syncing without removing them from a mapping,
-tick them in the tree and click `Ignore selected (N)`. Ignored files are
+tick them in the tree and click `Ignore selected (N)` (the button appears once
+something is ticked). Ignored files are
 **frozen**: they are never uploaded, and any document already in RAGFlow for
 them is left in place — the diff simply skips them. This is the key difference
 from *Exclude paths* in settings: excluding a path takes a file out of scope, so
@@ -470,8 +483,8 @@ the existing document untouched. Ignored files collect under a collapsible
 - Deleted local files remove the previously synced document from its dataset.
 - Unchanged files are skipped — unless the plugin's processing version moved on
   since they were synced, in which case they re-upload once (see above).
-- The scan itself is entirely local: vault versus the plugin's own record. Use
-  `Reconcile` to compare against what RAGFlow actually holds (see above).
+- A scan compares three things at once: your vault, the plugin's own record, and
+  what RAGFlow actually holds.
 
 With **Auto-parse after upload** enabled (the default, under *Parsing* in
 settings), every document a sync uploads is queued for parsing in RAGFlow right
@@ -501,8 +514,8 @@ replaced.
   dataset become same-named documents; give them distinct names or map them to
   different datasets if that matters to you. Since an upload replaces by name,
   such a pair overwrites each other and the dataset ends up holding fewer
-  documents than the vault — a `Reconcile` will report the loser as
-  `Missing in RAGFlow` every time.
+  documents than the vault — a scan reports the loser as `Missing in RAGFlow`
+  every time.
 - Keep your API key private. Do not commit Obsidian plugin data files containing
   local settings or secrets.
 

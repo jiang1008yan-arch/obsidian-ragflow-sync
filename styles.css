@@ -113,6 +113,15 @@
 	color: var(--text-faint);
 }
 
+.ragflow-sync-view .ragflow-sync-warning {
+	margin-top: 8px;
+	padding: 6px 8px;
+	border-radius: 4px;
+	border-left: 3px solid var(--color-orange);
+	background-color: var(--background-secondary);
+	font-size: var(--font-ui-smaller);
+}
+
 .ragflow-sync-view .ragflow-sync-counts {
 	margin-top: 8px;
 	padding: 6px 8px;
@@ -161,6 +170,28 @@
 	margin-top: 8px;
 	color: var(--text-muted);
 	font-size: var(--font-ui-smaller);
+}
+
+/* Sync button and its caret, joined so they read as one control. */
+.ragflow-sync-view .ragflow-sync-split {
+	display: flex;
+	flex: 0 0 auto;
+}
+
+.ragflow-sync-view .ragflow-sync-split button {
+	border-radius: 0;
+}
+
+.ragflow-sync-view .ragflow-sync-split button:first-child {
+	border-top-left-radius: var(--button-radius, 4px);
+	border-bottom-left-radius: var(--button-radius, 4px);
+}
+
+.ragflow-sync-view .ragflow-sync-split .ragflow-sync-more {
+	padding: 0 6px;
+	border-top-right-radius: var(--button-radius, 4px);
+	border-bottom-right-radius: var(--button-radius, 4px);
+	border-left: 1px solid var(--background-modifier-border);
 }
 
 .ragflow-modal-buttons {
