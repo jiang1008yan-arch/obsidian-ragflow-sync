@@ -488,6 +488,11 @@ replaced.
 
 - Sync is manual. The plugin does not currently auto-sync on file save.
 - Only files under configured dataset mappings are considered.
+- When mappings are nested, the **most specific one wins**: with `Notes → main`
+  and `Notes/Research → research`, files under `Notes/Research` go to `research`
+  and everything else under `Notes` goes to `main`. The order you list them in
+  does not matter. A whole-vault mapping (empty folder) is the least specific,
+  so it only catches what no folder mapping claims.
 - If a mapped vault folder does not exist, the scan shows a notice and skips it.
 - If you move or rename a local file, it may be detected as one deleted file and
   one new file.

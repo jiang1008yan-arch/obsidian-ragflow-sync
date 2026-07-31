@@ -11,9 +11,11 @@ const PAGE_SIZE = 100;
  * to a same-named upload instead of replacing it, so this finds the existing
  * copies to remove before a re-upload.
  *
- * The "(n)" group is purely numeric, so uploading `report.md` deliberately also
- * matches `report(2024).md` — an accepted trade-off for cleaning up the suffix
- * duplicates without a per-file allowlist.
+ * The "(n)" group is purely numeric, so `report(2024).md` also matches
+ * `report.md` by this predicate alone. That is not enough to act on: DocumentIndex
+ * checks candidates against the filenames the vault actually holds and refuses to
+ * delete one that is a real file, so a legitimate `report(2024).md` survives while
+ * a genuine `report(1).md` leftover does not.
  */
 export function isDuplicateName(candidate: string, baseName: string): boolean {
 	const dot = baseName.lastIndexOf(".");
@@ -21,6 +23,26 @@ export function isDuplicateName(candidate: string, baseName: string): boolean {
 	const ext = dot > 0 ? baseName.slice(dot) : "";
 	const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 	return new RegExp(`^${esc(stem)}(\\(\\d+\\))?${esc(ext)}$`).test(candidate);
+}
+
+/**
+ * A RAGFlow API failure that carries the HTTP status. Callers need it to tell
+ * "the thing you asked me to remove is already gone" (404) from a failure that
+ * left the server unchanged — the two call for opposite local bookkeeping.
+ */
+export class RagflowError extends Error {
+	readonly status?: number;
+
+	constructor(message: string, status?: number) {
+		super(message);
+		this.name = "RagflowError";
+		this.status = status;
+	}
+}
+
+/** Whether an error means the target does not exist on the server. */
+export function isNotFound(error: unknown): boolean {
+	return error instanceof RagflowError && error.status === 404;
 }
 
 export class RagflowClient {
@@ -67,10 +89,16 @@ export class RagflowClient {
 		}
 		if (resp.status < 200 || resp.status >= 300) {
 			const msg = payload?.message ?? resp.text ?? `HTTP ${resp.status}`;
-			throw new Error(`RAGFlow error (${resp.status}): ${msg}`);
+			throw new RagflowError(`RAGFlow error (${resp.status}): ${msg}`, resp.status);
 		}
 		if (payload && payload.code !== undefined && payload.code !== 0) {
-			throw new Error(`RAGFlow error: ${payload.message ?? "unknown error"}`);
+			// RAGFlow also reports "not found" as a 200 with a non-zero code, so
+			// recognise it here too rather than only on the HTTP status.
+			const msg = payload.message ?? "unknown error";
+			throw new RagflowError(
+				`RAGFlow error: ${msg}`,
+				/not\s*found|does\s*not\s*exist/i.test(msg) ? 404 : undefined
+			);
 		}
 		return (payload?.data ?? (payload as unknown)) as T;
 	}
@@ -210,42 +238,6 @@ export class RagflowClient {
 			page += 1;
 		}
 		return all;
-	}
-
-	/**
-	 * Ids of documents in a dataset whose name collides with `name` — the name
-	 * itself plus any RAGFlow "(n)" duplicate of it (see isDuplicateName). Used to
-	 * clear existing copies before a re-upload so the new file replaces them
-	 * instead of being auto-suffixed. Narrowed server-side by keyword on the stem,
-	 * then matched exactly client-side; paginates fully.
-	 */
-	async findDuplicateDocumentIds(
-		datasetId: string,
-		name: string
-	): Promise<string[]> {
-		const dot = name.lastIndexOf(".");
-		const stem = dot > 0 ? name.slice(0, dot) : name;
-		const ids: string[] = [];
-		let page = 1;
-		// eslint-disable-next-line no-constant-condition
-		while (true) {
-			const data = await this.send<{ docs?: RagflowDocument[] }>({
-				url: `${this.base()}/datasets/${datasetId}/documents${this.query({
-					keywords: stem,
-					page,
-					page_size: PAGE_SIZE,
-				})}`,
-				method: "GET",
-				headers: this.headers(),
-			});
-			const docs = data?.docs ?? [];
-			for (const d of docs) {
-				if (d.id && isDuplicateName(d.name, name)) ids.push(d.id);
-			}
-			if (docs.length < PAGE_SIZE) break;
-			page += 1;
-		}
-		return ids;
 	}
 
 	/**

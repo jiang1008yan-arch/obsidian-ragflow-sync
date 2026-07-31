@@ -1,5 +1,6 @@
 import { parseYaml } from "obsidian";
-import { RagflowClient } from "./ragflowClient";
+import { isNotFound, RagflowClient } from "./ragflowClient";
+import { DocumentIndex } from "./documentIndex";
 import { SyncStateStore } from "./syncState";
 import { sha256 } from "./hash";
 import { internalizeMarkdown } from "./internalize";
@@ -36,6 +37,36 @@ const CONTENT_TYPES: Record<string, string> = {
 };
 
 const FLUSH_EVERY = 25;
+
+const EMPTY_NAMES: ReadonlySet<string> = new Set();
+
+/**
+ * Files in flight at once. Each file costs several round trips, and they are
+ * independent, so a small pool turns a long serial chain into a much shorter
+ * one. Kept modest so a big sync does not flood a self-hosted RAGFlow.
+ */
+const UPLOAD_CONCURRENCY = 4;
+
+/** Run `worker` over `items`, at most `limit` at a time, in list order. */
+async function runPool<T>(
+	items: T[],
+	limit: number,
+	worker: (item: T) => Promise<void>
+): Promise<void> {
+	let next = 0;
+	const runners = Array.from(
+		{ length: Math.min(limit, items.length) },
+		async () => {
+			// eslint-disable-next-line no-constant-condition
+			while (true) {
+				const index = next++;
+				if (index >= items.length) return;
+				await worker(items[index]);
+			}
+		}
+	);
+	await Promise.all(runners);
+}
 
 export interface ApplyResult {
 	ok: number;
@@ -79,6 +110,9 @@ class SyncApplyRun {
 	private changes: FileChange[];
 	private onProgress?: (done: number, total: number, label: string) => void;
 	private processingVersion: number;
+	private index: DocumentIndex;
+	/** dataset name -> vault filenames under it, built on first use. */
+	private protectedNames = new Map<string, Set<string>>();
 
 	constructor(input: SyncApplyRunInput) {
 		this.vault = input.vault;
@@ -88,48 +122,54 @@ class SyncApplyRun {
 		this.changes = input.changes;
 		this.onProgress = input.onProgress;
 		this.processingVersion = input.processingVersion ?? PROCESSING_VERSION;
+		this.index = new DocumentIndex(input.client);
 	}
 
 	async apply(): Promise<ApplyResult> {
 		const actionable = this.changes.filter((c) => c.kind !== "unchanged");
+		// Uploads before deletions, as the assembled change list has always
+		// ordered them; only the parallelism within each phase is new.
+		const uploads = actionable.filter((c) => c.kind !== "deleted");
+		const deletions = actionable.filter((c) => c.kind === "deleted");
+
 		let done = 0;
 		const result: ApplyResult = { ok: 0, failed: 0, errors: [], parsed: 0 };
 		const uploaded = new Map<string, string[]>();
 
 		const companionIndex = await buildCompanionIndex(this.settings, this.vault);
 		let sinceFlush = 0;
-		try {
-			for (const change of actionable) {
-				try {
-					if (change.kind === "new" || change.kind === "missing") {
-						// "missing" means a reconcile found the tracked document gone from
-						// RAGFlow, so there is nothing to delete first: upload as if new.
-						const up = await this.syncUpload(change, undefined, companionIndex);
-						this.recordUpload(uploaded, up);
-						if (up.error) throw up.error;
-					} else if (change.kind === "modified") {
-						const up = await this.syncUpload(
-							change,
-							change.record,
-							companionIndex
-						);
-						this.recordUpload(uploaded, up);
-						if (up.error) throw up.error;
-					} else if (change.kind === "deleted") {
-						await this.syncDelete(change);
-					}
-					result.ok += 1;
-				} catch (e) {
-					result.failed += 1;
-					result.errors.push(`${change.vaultPath}: ${(e as Error).message}`);
+
+		const step = async (change: FileChange): Promise<void> => {
+			try {
+				if (change.kind === "new" || change.kind === "missing") {
+					// "missing" means a reconcile found the tracked document gone from
+					// RAGFlow, so there is nothing to delete first: upload as if new.
+					const up = await this.syncUpload(change, undefined, companionIndex);
+					this.recordUpload(uploaded, up);
+					if (up.error) throw up.error;
+				} else if (change.kind === "modified") {
+					const up = await this.syncUpload(change, change.record, companionIndex);
+					this.recordUpload(uploaded, up);
+					if (up.error) throw up.error;
+				} else if (change.kind === "deleted") {
+					await this.syncDelete(change);
 				}
-				done += 1;
-				if (++sinceFlush >= FLUSH_EVERY) {
-					await this.store.flush();
-					sinceFlush = 0;
-				}
-				this.onProgress?.(done, actionable.length, change.vaultPath);
+				result.ok += 1;
+			} catch (e) {
+				result.failed += 1;
+				result.errors.push(`${change.vaultPath}: ${(e as Error).message}`);
 			}
+			done += 1;
+			if (++sinceFlush >= FLUSH_EVERY) {
+				sinceFlush = 0;
+				await this.store.flush();
+			}
+			this.onProgress?.(done, actionable.length, change.vaultPath);
+		};
+
+		try {
+			await runPool(uploads, UPLOAD_CONCURRENCY, step);
+			await runPool(deletions, UPLOAD_CONCURRENCY, step);
 		} finally {
 			await this.store.flush();
 		}
@@ -148,10 +188,12 @@ class SyncApplyRun {
 					change.record.documentId,
 				]);
 			} catch (e) {
-				console.warn(
-					`RAGFlow Sync: delete of ${change.vaultPath} failed ` +
-						`(treating as already gone): ${(e as Error).message}`
-				);
+				// A document RAGFlow says it does not have is already in the state we
+				// wanted, so clearing the record is correct. Any other failure left
+				// the document in place: keep the record and report the failure, so
+				// the deletion is retried instead of quietly becoming an orphan that
+				// only a reconcile could ever find again.
+				if (!isNotFound(e)) throw e;
 			}
 		}
 		this.store.deleteFile(change.vaultPath);
@@ -208,7 +250,11 @@ class SyncApplyRun {
 			}
 		}
 
-		await this.clearDuplicateDocuments(datasetId, file.name);
+		await this.clearDuplicateDocuments(
+			datasetId,
+			file.name,
+			change.mapping?.datasetName
+		);
 
 		const prepared =
 			file.extension.toLowerCase() === "md"
@@ -238,6 +284,7 @@ class SyncApplyRun {
 			uploadBytes,
 			contentType
 		);
+		this.index.record(datasetId, file.name, doc.id);
 
 		let metaError: Error | null = null;
 		if (Object.keys(meta).length > 0) {
@@ -329,14 +376,42 @@ class SyncApplyRun {
 		}
 	}
 
+	/**
+	 * Filenames the vault holds for a dataset. A document whose name is one of
+	 * these is a real file's document, never a duplicate to sweep up.
+	 */
+	private protectedNamesFor(datasetName: string | undefined): ReadonlySet<string> {
+		if (!datasetName) return EMPTY_NAMES;
+		const cached = this.protectedNames.get(datasetName);
+		if (cached) return cached;
+
+		const names = new Set<string>();
+		for (const change of this.changes) {
+			if (change.kind === "deleted") continue;
+			if (change.mapping?.datasetName !== datasetName) continue;
+			const slash = change.vaultPath.lastIndexOf("/");
+			names.add(
+				slash < 0 ? change.vaultPath : change.vaultPath.slice(slash + 1)
+			);
+		}
+		this.protectedNames.set(datasetName, names);
+		return names;
+	}
+
 	private async clearDuplicateDocuments(
 		datasetId: string,
-		name: string
+		name: string,
+		datasetName: string | undefined
 	): Promise<void> {
 		try {
-			const dupes = await this.client.findDuplicateDocumentIds(datasetId, name);
+			const dupes = await this.index.duplicateIds(
+				datasetId,
+				name,
+				this.protectedNamesFor(datasetName)
+			);
 			if (dupes.length > 0) {
 				await this.client.deleteDocuments(datasetId, dupes);
+				this.index.forget(datasetId, new Set(dupes));
 			}
 		} catch (e) {
 			console.warn(

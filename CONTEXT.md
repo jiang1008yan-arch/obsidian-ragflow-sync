@@ -88,7 +88,8 @@ _Avoid_: view state, UI helper.
 
 ## Relationships
 
-- A **Dataset mapping** defines part of what counts as **In-scope** and names the destination dataset.
+- A **Dataset mapping** defines part of what counts as **In-scope** and names the destination dataset. When several mappings' folders contain a file, the **longest** prefix owns it, so a nested mapping beats the broader one regardless of list order.
+- An upload's replace-by-name step reads a per-dataset name→ids index listed once per **Sync apply run**, not a search per file, and never deletes a candidate whose name is a filename the vault actually holds.
 - The **Diff** consumes a **Vault snapshot** and the **Synced state** and emits **Change kind**s. It never reads RAGFlow, so remote-side drift is structurally invisible to it — that is the **Remote reconcile**'s job.
 - A **Remote reconcile** runs after the Diff, over its change list: it promotes `unchanged` entries to **Missing** and emits **Orphan**s alongside the change list. It also drops the **Ignore (snooze)** of anything it marks Missing, since a vault-side snooze cannot speak for a document that is gone.
 - A **Mirror** reads RAGFlow the same way a **Remote reconcile** does, but decides by name instead of by record, and then executes: its plan is a **Sync apply run** (uploads, plus the deletions that must clear a **Synced state** record) followed by direct deletes of the rest. Reconcile reports and lets the user pick; Mirror acts on the whole set at once, which is why it confirms first.
@@ -96,7 +97,7 @@ _Avoid_: view state, UI helper.
 - A **Touch refresh** updates the **Synced state** without producing a visible **Change kind** (it stays "unchanged").
 - An **Ignore (snooze)** is applied to the **Change kind**s after the **Diff** runs: it sets an `ignored` flag that drops the entry from the Scan diff list, while the **Deletion rule** still produces the underlying `deleted` kind beneath it.
 - A Markdown file's **Frontmatter metadata** is uploaded separately from its body, via the metadata API, after the document upload.
-- An upload **replaces by name**: before uploading, the engine deletes the tracked document (by id) *and* every same-named document in the dataset — including RAGFlow's `name(n).ext` duplicates — because RAGFlow auto-suffixes a same-named upload instead of replacing it. This keeps one document per filename per dataset even when the local record was lost. Filenames must therefore be unique within a dataset.
+- An upload **replaces by name**: before uploading, the engine deletes the tracked document (by id) *and* every same-named document in the dataset — including RAGFlow's `name(n).ext` duplicates — because RAGFlow auto-suffixes a same-named upload instead of replacing it. This keeps one document per filename per dataset even when the local record was lost. Filenames must therefore be unique within a dataset. A `name(n).ext` that is itself a vault filename is spared, since it is a real file's document rather than a leftover.
 
 - A **Sync apply run** consumes **Change kind**s produced by the **Diff** and mutates **Synced state** only after RAGFlow accepts the corresponding remote operation. If **Frontmatter metadata** fails after upload, the document remains in RAGFlow, is still queued for auto-parse, and the **Synced state** record is marked `metaPending` so the next **Diff** re-surfaces it.
 - **Vault access** is the seam between Obsidian's runtime objects and the sync modules; tests can provide an in-memory adapter without knowing `app.vault` or `metadataCache`.
