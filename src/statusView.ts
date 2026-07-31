@@ -1,8 +1,16 @@
-import { ItemView, Notice, WorkspaceLeaf } from "obsidian";
+import { App, ItemView, Modal, Notice, WorkspaceLeaf } from "obsidian";
 import type RagflowSyncPlugin from "./main";
-import { ChangeKind, FileChange, RemoteOrphan } from "./types";
+import {
+	ChangeKind,
+	DatasetCount,
+	FileChange,
+	MirrorPlan,
+	RemoteOrphan,
+} from "./types";
+import { mirrorTotals } from "./mirror";
 import { summarize } from "./syncEngine";
 import {
+	countNotes,
 	forceAllChanges,
 	forceSelectedChanges,
 	syncAllChanges,
@@ -22,6 +30,46 @@ import {
 
 export const VIEW_TYPE_RAGFLOW_SYNC = "ragflow-sync-view";
 
+/**
+ * Confirmation for a Mirror, which is the one action that deletes documents
+ * without the user having picked them one by one. Resolves true only if the
+ * confirm button is pressed; dismissing the modal any other way cancels.
+ */
+class MirrorConfirmModal extends Modal {
+	private lines: string[];
+	private onConfirm: () => void;
+	private confirmed = false;
+
+	constructor(app: App, lines: string[], onConfirm: () => void) {
+		super(app);
+		this.lines = lines;
+		this.onConfirm = onConfirm;
+	}
+
+	onOpen(): void {
+		this.titleEl.setText("Mirror vault to RAGFlow");
+		for (const line of this.lines) {
+			this.contentEl.createEl("p", { text: line });
+		}
+
+		const buttons = this.contentEl.createDiv({ cls: "ragflow-modal-buttons" });
+		const cancel = buttons.createEl("button", { text: "Cancel" });
+		cancel.onclick = () => this.close();
+
+		const confirm = buttons.createEl("button", { text: "Mirror" });
+		confirm.addClass("mod-warning");
+		confirm.onclick = () => {
+			this.confirmed = true;
+			this.close();
+		};
+	}
+
+	onClose(): void {
+		this.contentEl.empty();
+		if (this.confirmed) this.onConfirm();
+	}
+}
+
 const KIND_LABEL: Record<ChangeKind, string> = {
 	new: "New",
 	modified: "Modified",
@@ -36,8 +84,8 @@ export class RagflowSyncView extends ItemView {
 	private changes: FileChange[] = [];
 	/** RAGFlow documents nothing in the vault accounts for; empty until a reconcile. */
 	private orphans: RemoteOrphan[] = [];
-	/** Per-dataset "remote N / tracked M" lines from the last reconcile. */
-	private countLines: string[] = [];
+	/** Per-dataset tallies from the last reconcile. */
+	private counts: DatasetCount[] = [];
 	private statusEl: HTMLElement | null = null;
 	/** Whether a scan has completed, as distinct from having found changes. */
 	private scanned = false;
@@ -125,7 +173,7 @@ export class RagflowSyncView extends ItemView {
 
 	private clearReconcile(): void {
 		this.orphans = [];
-		this.countLines = [];
+		this.counts = [];
 		this.selectedOrphans.clear();
 	}
 
@@ -157,9 +205,7 @@ export class RagflowSyncView extends ItemView {
 			this.changes = result.changes;
 			this.orphans = result.orphans;
 			this.selectedOrphans.clear();
-			this.countLines = result.counts.map(
-				(c) => `${c.datasetName}: ${c.remote} in RAGFlow / ${c.tracked} tracked`
-			);
+			this.counts = result.counts;
 			await this.plugin.saveSettings();
 			this.expanded = foldersWithChanges(this.changes);
 			this.render();
@@ -176,6 +222,91 @@ export class RagflowSyncView extends ItemView {
 			this.setStatus(`Reconcile failed: ${(e as Error).message}`);
 		} finally {
 			this.busy = false;
+		}
+	}
+
+	/**
+	 * Mirror: make every mapped dataset match its source folder exactly —
+	 * documents the folder does not account for are deleted, files the dataset
+	 * lacks are uploaded, names on both sides are left alone.
+	 *
+	 * Unlike a scan or a reconcile this judges by name rather than through the
+	 * local synced state, so it is the recovery path when that state is wrong or
+	 * lost. It disregards snoozes, and it always confirms first, because it is
+	 * the one action that deletes documents the user did not pick individually.
+	 */
+	async mirror(): Promise<void> {
+		if (this.busy) return;
+		if (!this.plugin.settings.apiKey) {
+			new Notice("Set your RAGFlow API key in settings first.");
+			return;
+		}
+		if (!this.scanned) await this.scan();
+		if (!this.scanned) return;
+
+		this.busy = true;
+		this.setStatus("Planning mirror...");
+		let plan: MirrorPlan;
+		try {
+			plan = await this.plugin.engine.planMirror(this.changes, (label) =>
+				this.setStatus(label)
+			);
+		} catch (e) {
+			new Notice(`Mirror planning failed: ${(e as Error).message}`);
+			this.setStatus(`Mirror planning failed: ${(e as Error).message}`);
+			this.busy = false;
+			return;
+		}
+		this.busy = false;
+
+		const totals = mirrorTotals(plan);
+		if (totals.uploads === 0 && totals.deletes === 0) {
+			this.setStatus(
+				`Mirror: already matching (${totals.kept} document(s) in place).`
+			);
+			new Notice("RAGFlow already matches your vault.");
+			return;
+		}
+
+		const lines = [
+			`Upload ${totals.uploads} file(s) to RAGFlow.`,
+			`Delete ${totals.deletes} document(s) from RAGFlow.`,
+			`Leave ${totals.kept} document(s) untouched.`,
+			"Deletions cannot be undone. Snoozed (ignored) files are included: a " +
+				"mirror makes RAGFlow match your vault exactly.",
+		];
+		new MirrorConfirmModal(this.app, lines, () => void this.runMirror(plan)).open();
+	}
+
+	/** Execute a confirmed Mirror plan: uploads and record-clearing deletes first, then orphans. */
+	private async runMirror(plan: MirrorPlan): Promise<void> {
+		if (this.busy) return;
+		this.busy = true;
+		try {
+			const applied = await this.plugin.engine.applyChanges(
+				plan.changes,
+				(done, total, label) => this.setStatus(`Mirroring ${done}/${total}: ${label}`)
+			);
+			const removed = await this.plugin.engine.deleteOrphans(
+				plan.orphanDeletes,
+				(done, total, label) => this.setStatus(`${label} ${done}/${total}`)
+			);
+
+			let msg = `Mirror done: ${applied.ok} file(s) synced`;
+			if (removed.ok > 0) msg += `, ${removed.ok} document(s) deleted`;
+			if (applied.parsed > 0) msg += `, parsing ${applied.parsed}`;
+			const failed = applied.failed + removed.failed;
+			if (failed > 0) msg += `, ${failed} failed`;
+			msg += ".";
+			new Notice(msg);
+
+			const errors = [...applied.errors, ...removed.errors];
+			if (errors.length > 0) console.error("RAGFlow Sync mirror errors:", errors);
+		} catch (e) {
+			new Notice(`Mirror failed: ${(e as Error).message}`);
+		} finally {
+			this.busy = false;
+			await this.scan();
 		}
 	}
 
@@ -210,7 +341,7 @@ export class RagflowSyncView extends ItemView {
 			const gone = new Set(result.deletedIds);
 			this.orphans = this.orphans.filter((o) => !gone.has(o.documentId));
 			// The per-dataset tallies counted the documents we just removed.
-			this.countLines = [];
+			this.counts = [];
 			this.selectedOrphans.clear();
 			this.render();
 			this.setStatus(msg);
@@ -383,6 +514,14 @@ export class RagflowSyncView extends ItemView {
 				"added or deleted on the RAGFlow side never show up in it.";
 			reconcileBtn.onclick = () => void this.reconcile();
 
+			const mirrorBtn = toolbar.createEl("button", { text: "Mirror" });
+			mirrorBtn.title =
+				"Make RAGFlow match your vault folders exactly: delete documents " +
+				"the folders do not account for, upload what is missing, leave the " +
+				"rest alone. Judged by filename rather than the plugin's local " +
+				"record, so it works even when that record is wrong. Confirms first.";
+			mirrorBtn.onclick = () => void this.mirror();
+
 			this.syncSelectedBtn = toolbar.createEl("button", {
 				text: "Sync selected",
 			});
@@ -405,12 +544,25 @@ export class RagflowSyncView extends ItemView {
 		}
 	}
 
-	/** The per-dataset "remote N / tracked M" tallies from the last reconcile. */
+	/**
+	 * The per-dataset tallies from the last reconcile, one line per dataset plus
+	 * a note wherever a number needs explaining. The three counts answer
+	 * different questions: RAGFlow below tracked means documents were lost
+	 * remotely, tracked below vault means files were never uploaded.
+	 */
 	private renderCounts(container: HTMLElement): void {
-		if (this.countLines.length === 0) return;
+		if (this.counts.length === 0) return;
 		const box = container.createDiv({ cls: "ragflow-sync-counts" });
-		for (const line of this.countLines) {
-			box.createDiv({ cls: "ragflow-sync-count-line", text: line });
+		for (const c of this.counts) {
+			box.createDiv({
+				cls: "ragflow-sync-count-line",
+				text:
+					`${c.datasetName}: ${c.remote} in RAGFlow / ` +
+					`${c.tracked} tracked / ${c.inScope} in vault`,
+			});
+			for (const note of countNotes(c)) {
+				box.createDiv({ cls: "ragflow-sync-count-note", text: note });
+			}
 		}
 	}
 

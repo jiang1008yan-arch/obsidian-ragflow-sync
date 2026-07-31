@@ -174,11 +174,49 @@ export interface ReconcileResult {
 	absentDatasets: string[];
 }
 
-/** What RAGFlow holds for a dataset versus what the synced state tracks in it. */
+/**
+ * A dataset's full tally, across all three places a file can be counted:
+ * RAGFlow itself, the synced state, and the vault. They answer different
+ * questions and routinely disagree — `remote` below `tracked` means RAGFlow
+ * lost documents, `tracked` below `inScope` means files were never uploaded,
+ * and `distinctNames` below `inScope` means same-named files are overwriting
+ * each other. `skipped` explains a folder that dwarfs its dataset.
+ */
 export interface DatasetCount {
 	datasetName: string;
+	/** Documents actually in the RAGFlow dataset. */
 	remote: number;
+	/** Synced-state records pointing at it. */
 	tracked: number;
+	/** In-scope vault files routed to it. */
+	inScope: number;
+	/** Distinct document names among those files — the ceiling on `remote`. */
+	distinctNames: number;
+	/** Files under its mapped folders that extension/exclude rules skip. */
+	skipped: number;
+}
+
+/** The vault-side half of a DatasetCount. */
+export interface DatasetFileTally {
+	inScope: number;
+	distinctNames: number;
+}
+
+/**
+ * What a Mirror would do to make the datasets match their source folders.
+ * Computed and shown for confirmation before anything is sent, because it is
+ * the one action that deletes documents without being asked file by file.
+ */
+export interface MirrorPlan {
+	/**
+	 * Changes to run through a Sync apply run: uploads, plus the deletions that
+	 * own a Synced state record and so must clear it as well as the document.
+	 */
+	changes: FileChange[];
+	/** Documents no record points at, removed directly. */
+	orphanDeletes: RemoteOrphan[];
+	/** Files already correct on both sides, left untouched. */
+	kept: number;
 }
 
 /** An unfiltered point-in-time entry from the vault snapshot. */

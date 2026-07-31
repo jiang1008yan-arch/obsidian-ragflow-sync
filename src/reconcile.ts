@@ -1,9 +1,13 @@
 import {
+	DatasetFileTally,
 	DatasetReconciliation,
 	FileChange,
 	RagflowDocument,
 	RemoteOrphan,
+	ScopeConfig,
+	VaultEntry,
 } from "./types";
+import { isInScope, owningMapping } from "./mapping";
 
 /**
  * Pure Remote reconcile: classify what RAGFlow actually holds against the
@@ -124,4 +128,52 @@ export function trackedCount(
 	datasetId: string
 ): number {
 	return Object.values(files).filter((r) => r.datasetId === datasetId).length;
+}
+
+/**
+ * The vault side of a dataset's tally: how many in-scope files are routed to
+ * it, and how many distinct document names they carry.
+ *
+ * The two differ when files in different folders share a basename. Datasets are
+ * flat and an upload replaces by name, so `distinctNames` is the ceiling on how
+ * many documents the dataset can ever hold — a same-named pair overwrites each
+ * other no matter how often it syncs. That makes the gap between these two
+ * numbers the explanation for a dataset that is permanently short.
+ */
+export function datasetFileTally(
+	changes: FileChange[],
+	datasetName: string
+): DatasetFileTally {
+	let inScope = 0;
+	for (const change of changes) {
+		if (change.kind === "deleted") continue;
+		if (change.mapping?.datasetName !== datasetName) continue;
+		inScope += 1;
+	}
+	return {
+		inScope,
+		distinctNames: expectedNames(changes, datasetName).size,
+	};
+}
+
+/**
+ * Files sitting under this dataset's mapped folders that scope rules skip —
+ * wrong extension, or matching an exclude. They are invisible everywhere else
+ * (never uploaded, never tracked, never a change), so a folder that looks far
+ * bigger than its dataset is usually explained here.
+ */
+export function skippedCount(
+	snapshot: VaultEntry[],
+	scope: ScopeConfig,
+	datasetName: string
+): number {
+	let skipped = 0;
+	for (const entry of snapshot) {
+		if (isInScope(entry.path, scope)) continue;
+		// Scope-blind ownership: which mapping's folder the file sits under,
+		// regardless of whether the extension/exclude rules let it through.
+		if (owningMapping(entry.path, scope)?.datasetName !== datasetName) continue;
+		skipped += 1;
+	}
+	return skipped;
 }

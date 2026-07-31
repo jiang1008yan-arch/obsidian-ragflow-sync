@@ -378,8 +378,21 @@ the scan cheerfully reports everything up to date. That happens when:
 Click `Reconcile` to close that gap. It lists every document actually in each
 mapped dataset and cross-references it with your vault, then reports:
 
-- a `datasetname: 128 in RAGFlow / 120 tracked` line per dataset, so a mismatch
-  is visible at a glance;
+- a `datasetname: 128 in RAGFlow / 120 tracked / 135 in vault` line per dataset,
+  plus a plain-language note under it for every gap. The three numbers answer
+  different questions and routinely disagree:
+  - **in RAGFlow** — documents actually in the dataset right now.
+  - **tracked** — documents the plugin's local record says it uploaded. Fewer
+    documents in RAGFlow than tracked means RAGFlow lost them.
+  - **in vault** — in-scope files routed to this dataset. More files in the
+    vault than tracked means they were never uploaded (they show as `New`).
+
+  Note that "in vault" counts only files the plugin manages. If a mapped folder
+  holds far more files than that, the note tells you how many the extension and
+  exclude settings skip — those are never synced and never counted anywhere
+  else. A separate note appears when two files in different subfolders share a
+  filename: datasets are flat and uploads replace by name, so such a pair
+  overwrites itself and caps how many documents the dataset can ever hold.
 - an **In RAGFlow only (N)** section listing documents nothing in your vault
   accounts for. Tick the ones you want gone and click `Delete N from RAGFlow`.
   This is a separate button from `Sync all` on purpose: a dataset may
@@ -398,6 +411,43 @@ hand in RAGFlow. It is also available as
 `RAGFlow Sync: Reconcile with RAGFlow` in the command palette. Note that syncing
 re-scans the vault afterwards, which clears the reconcile result — run
 `Reconcile` again if you want a fresh picture.
+
+### Mirroring A Folder Into RAGFlow
+
+`Reconcile` reports; `Mirror` acts. Click `Mirror` to make every mapped dataset
+match its source folder exactly, in one step:
+
+- a document the folder does not account for is **deleted**;
+- a file the dataset does not hold is **uploaded**;
+- a name present on both sides is **left alone** (unless its content changed,
+  in which case it re-uploads).
+
+The important difference from a scan or a reconcile is what it trusts. Those two
+reason through the plugin's local record of what it uploaded, so a lost or stale
+record misleads them. A mirror compares **filenames** — the set of in-scope files
+routed to a dataset against the set of documents actually in it — and lets that
+decide. That makes it the recovery path when the local record cannot be trusted
+at all: after restoring plugin data, moving to a new machine, or any time the
+numbers stopped making sense.
+
+Two things it still takes from the ordinary scan, because names cannot see them:
+a file whose *content* changed keeps its name, so the hash comparison is what
+catches it; and a vault file that is gone needs its local record cleared, not
+just its document deleted.
+
+A mirror always shows a confirmation with the counts first — how many files it
+will upload, how many documents it will delete, how many it will leave alone.
+Two warnings worth reading before you confirm:
+
+- **Deletions are not reversible.** If a mapped dataset holds documents that
+  legitimately did not come from this vault, a mirror deletes them. Use
+  `Reconcile` and the per-document `In RAGFlow only` list instead when you want
+  to choose case by case.
+- **Snoozed files are included.** Ignoring a file says "leave this one alone",
+  which cannot survive an instruction to make the dataset match the folder.
+
+It is also available as `RAGFlow Sync: Mirror vault to RAGFlow` in the command
+palette.
 
 ### Ignoring Files
 

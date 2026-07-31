@@ -368,10 +368,10 @@ Content-Type: ${contentType}\r
 
 // src/ragflowClient.ts
 var PAGE_SIZE = 100;
-function isDuplicateName(candidate, baseName2) {
-  const dot = baseName2.lastIndexOf(".");
-  const stem = dot > 0 ? baseName2.slice(0, dot) : baseName2;
-  const ext = dot > 0 ? baseName2.slice(dot) : "";
+function isDuplicateName(candidate, baseName3) {
+  const dot = baseName3.lastIndexOf(".");
+  const stem = dot > 0 ? baseName3.slice(0, dot) : baseName3;
+  const ext = dot > 0 ? baseName3.slice(dot) : "";
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`^${esc(stem)}(\\(\\d+\\))?${esc(ext)}$`).test(candidate);
 }
@@ -933,6 +933,98 @@ function markMissing(changes, missingPaths) {
 function trackedCount(files, datasetId) {
   return Object.values(files).filter((r) => r.datasetId === datasetId).length;
 }
+function datasetFileTally(changes, datasetName) {
+  let inScope = 0;
+  for (const change of changes) {
+    if (change.kind === "deleted")
+      continue;
+    if (change.mapping?.datasetName !== datasetName)
+      continue;
+    inScope += 1;
+  }
+  return {
+    inScope,
+    distinctNames: expectedNames(changes, datasetName).size
+  };
+}
+function skippedCount(snapshot, scope, datasetName) {
+  let skipped = 0;
+  for (const entry of snapshot) {
+    if (isInScope(entry.path, scope))
+      continue;
+    if (owningMapping(entry.path, scope)?.datasetName !== datasetName)
+      continue;
+    skipped += 1;
+  }
+  return skipped;
+}
+
+// src/mirror.ts
+function baseName2(vaultPath) {
+  const slash = vaultPath.lastIndexOf("/");
+  return slash < 0 ? vaultPath : vaultPath.slice(slash + 1);
+}
+function promote(change) {
+  return { ...change, kind: "modified", hash: void 0, ignored: false };
+}
+function planMirrorForDataset(datasetName, datasetId, remoteDocs, changes) {
+  const mine = changes.filter((c) => c.mapping?.datasetName === datasetName);
+  const vaultNames = new Set(
+    mine.filter((c) => c.kind !== "deleted").map((c) => baseName2(c.vaultPath))
+  );
+  const remoteNames = new Set(remoteDocs.map((d) => d.name));
+  const handledIds = new Set(
+    mine.filter((c) => c.kind === "deleted" && c.record).map((c) => c.record.documentId)
+  );
+  const orphanDeletes = [];
+  for (const doc of remoteDocs) {
+    if (!doc.id)
+      continue;
+    if (vaultNames.has(doc.name))
+      continue;
+    if (handledIds.has(doc.id))
+      continue;
+    orphanDeletes.push({
+      datasetName,
+      datasetId,
+      documentId: doc.id,
+      documentName: doc.name
+    });
+  }
+  const planned = [];
+  let kept = 0;
+  for (const change of mine) {
+    if (change.kind === "unchanged") {
+      if (remoteNames.has(baseName2(change.vaultPath)))
+        kept += 1;
+      else
+        planned.push(promote(change));
+      continue;
+    }
+    planned.push({ ...change, ignored: false });
+  }
+  return { changes: planned, orphanDeletes, kept };
+}
+function mirrorTotals(plan) {
+  let uploads = 0;
+  let deletes = plan.orphanDeletes.length;
+  for (const change of plan.changes) {
+    if (change.kind === "deleted")
+      deletes += 1;
+    else
+      uploads += 1;
+  }
+  return { uploads, deletes, kept: plan.kept };
+}
+function mergeMirrorPlans(plans) {
+  const merged = { changes: [], orphanDeletes: [], kept: 0 };
+  for (const plan of plans) {
+    merged.changes.push(...plan.changes);
+    merged.orphanDeletes.push(...plan.orphanDeletes);
+    merged.kept += plan.kept;
+  }
+  return merged;
+}
 
 // src/syncApplyRun.ts
 var import_obsidian4 = require("obsidian");
@@ -1076,8 +1168,8 @@ function frontmatterLinkTargets(value) {
   visit(value);
   return out;
 }
-function splitPartStem(baseName2) {
-  const m = /^(.+?)_p\d+(?:-\d+)?$/i.exec(baseName2);
+function splitPartStem(baseName3) {
+  const m = /^(.+?)_p\d+(?:-\d+)?$/i.exec(baseName3);
   return m ? m[1] : null;
 }
 function normalizeMeta(parsed) {
@@ -1714,6 +1806,8 @@ var SyncEngine = class {
     const trackedIds = new Set(
       Object.values(this.store.allFiles()).map((r) => r.documentId)
     );
+    const snapshot = this.buildSnapshot();
+    const scope = this.scope();
     const orphans = [];
     const counts = [];
     const absentDatasets = [];
@@ -1735,10 +1829,14 @@ var SyncEngine = class {
       );
       orphans.push(...result.orphans);
       missingPaths.push(...result.missingPaths);
+      const tally = datasetFileTally(changes, name);
       counts.push({
         datasetName: name,
         remote: remoteDocs.length,
-        tracked: trackedCount(this.store.allFiles(), datasetId)
+        tracked: trackedCount(this.store.allFiles(), datasetId),
+        inScope: tally.inScope,
+        distinctNames: tally.distinctNames,
+        skipped: skippedCount(snapshot, scope, name)
       });
     }
     const settings = this.getSettings();
@@ -1747,6 +1845,30 @@ var SyncEngine = class {
       delete settings.ignoredEntries[path];
     await this.store.flush();
     return { changes: marked.changes, orphans, counts, absentDatasets };
+  }
+  /**
+   * Plan a Mirror: what it would take to make every mapped dataset match its
+   * source folder, judged by name rather than through the synced state. Reads
+   * RAGFlow exactly as reconcile does; sends nothing. The caller confirms the
+   * plan before executing it.
+   */
+  async planMirror(changes, onProgress) {
+    this.client.invalidate();
+    const names = [
+      ...new Set(
+        this.getSettings().datasetMappings.map((m) => m.datasetName.trim()).filter((n) => n.length > 0)
+      )
+    ];
+    const plans = [];
+    for (const name of names) {
+      onProgress?.(`Reading "${name}" from RAGFlow...`);
+      const datasetId = await this.client.findDatasetId(name);
+      const remoteDocs = datasetId ? await this.client.listDocuments(datasetId) : [];
+      plans.push(
+        planMirrorForDataset(name, datasetId ?? "", remoteDocs, changes)
+      );
+    }
+    return mergeMirrorPlans(plans);
   }
   /**
    * Delete orphaned documents from RAGFlow, batched per dataset. Nothing in the
@@ -1925,6 +2047,30 @@ function forceSelectedChanges(changes, selected) {
 function forceAllChanges(changes) {
   return changes.filter((c) => !c.ignored).map(forceUploadChange);
 }
+function countNotes(c) {
+  const notes = [];
+  if (c.remote < c.tracked) {
+    notes.push(
+      `${c.tracked - c.remote} document(s) tracked but not in RAGFlow \u2014 badged "Missing in RAGFlow"; sync to re-upload.`
+    );
+  }
+  if (c.inScope > c.tracked) {
+    notes.push(
+      `${c.inScope - c.tracked} file(s) never uploaded \u2014 badged "New"; sync to upload.`
+    );
+  }
+  if (c.inScope > c.distinctNames) {
+    notes.push(
+      `${c.inScope - c.distinctNames} file(s) share a document name with another file here. Datasets are flat and uploads replace by name, so this dataset can never hold more than ${c.distinctNames} documents \u2014 rename them or split the mapping.`
+    );
+  }
+  if (c.skipped > 0) {
+    notes.push(
+      `${c.skipped} file(s) in the mapped folder(s) are skipped by the extension/exclude settings and are never synced.`
+    );
+  }
+  return notes;
+}
 function forceUploadChange(change) {
   return change.kind === "unchanged" || change.ignored ? {
     ...change,
@@ -1936,6 +2082,34 @@ function forceUploadChange(change) {
 
 // src/statusView.ts
 var VIEW_TYPE_RAGFLOW_SYNC = "ragflow-sync-view";
+var MirrorConfirmModal = class extends import_obsidian6.Modal {
+  constructor(app, lines, onConfirm) {
+    super(app);
+    this.confirmed = false;
+    this.lines = lines;
+    this.onConfirm = onConfirm;
+  }
+  onOpen() {
+    this.titleEl.setText("Mirror vault to RAGFlow");
+    for (const line of this.lines) {
+      this.contentEl.createEl("p", { text: line });
+    }
+    const buttons = this.contentEl.createDiv({ cls: "ragflow-modal-buttons" });
+    const cancel = buttons.createEl("button", { text: "Cancel" });
+    cancel.onclick = () => this.close();
+    const confirm = buttons.createEl("button", { text: "Mirror" });
+    confirm.addClass("mod-warning");
+    confirm.onclick = () => {
+      this.confirmed = true;
+      this.close();
+    };
+  }
+  onClose() {
+    this.contentEl.empty();
+    if (this.confirmed)
+      this.onConfirm();
+  }
+};
 var KIND_LABEL = {
   new: "New",
   modified: "Modified",
@@ -1950,8 +2124,8 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
     this.changes = [];
     /** RAGFlow documents nothing in the vault accounts for; empty until a reconcile. */
     this.orphans = [];
-    /** Per-dataset "remote N / tracked M" lines from the last reconcile. */
-    this.countLines = [];
+    /** Per-dataset tallies from the last reconcile. */
+    this.counts = [];
     this.statusEl = null;
     /** Whether a scan has completed, as distinct from having found changes. */
     this.scanned = false;
@@ -2023,7 +2197,7 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
   }
   clearReconcile() {
     this.orphans = [];
-    this.countLines = [];
+    this.counts = [];
     this.selectedOrphans.clear();
   }
   /**
@@ -2055,9 +2229,7 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
       this.changes = result.changes;
       this.orphans = result.orphans;
       this.selectedOrphans.clear();
-      this.countLines = result.counts.map(
-        (c) => `${c.datasetName}: ${c.remote} in RAGFlow / ${c.tracked} tracked`
-      );
+      this.counts = result.counts;
       await this.plugin.saveSettings();
       this.expanded = foldersWithChanges(this.changes);
       this.render();
@@ -2074,6 +2246,92 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
       this.setStatus(`Reconcile failed: ${e.message}`);
     } finally {
       this.busy = false;
+    }
+  }
+  /**
+   * Mirror: make every mapped dataset match its source folder exactly —
+   * documents the folder does not account for are deleted, files the dataset
+   * lacks are uploaded, names on both sides are left alone.
+   *
+   * Unlike a scan or a reconcile this judges by name rather than through the
+   * local synced state, so it is the recovery path when that state is wrong or
+   * lost. It disregards snoozes, and it always confirms first, because it is
+   * the one action that deletes documents the user did not pick individually.
+   */
+  async mirror() {
+    if (this.busy)
+      return;
+    if (!this.plugin.settings.apiKey) {
+      new import_obsidian6.Notice("Set your RAGFlow API key in settings first.");
+      return;
+    }
+    if (!this.scanned)
+      await this.scan();
+    if (!this.scanned)
+      return;
+    this.busy = true;
+    this.setStatus("Planning mirror...");
+    let plan;
+    try {
+      plan = await this.plugin.engine.planMirror(
+        this.changes,
+        (label) => this.setStatus(label)
+      );
+    } catch (e) {
+      new import_obsidian6.Notice(`Mirror planning failed: ${e.message}`);
+      this.setStatus(`Mirror planning failed: ${e.message}`);
+      this.busy = false;
+      return;
+    }
+    this.busy = false;
+    const totals = mirrorTotals(plan);
+    if (totals.uploads === 0 && totals.deletes === 0) {
+      this.setStatus(
+        `Mirror: already matching (${totals.kept} document(s) in place).`
+      );
+      new import_obsidian6.Notice("RAGFlow already matches your vault.");
+      return;
+    }
+    const lines = [
+      `Upload ${totals.uploads} file(s) to RAGFlow.`,
+      `Delete ${totals.deletes} document(s) from RAGFlow.`,
+      `Leave ${totals.kept} document(s) untouched.`,
+      "Deletions cannot be undone. Snoozed (ignored) files are included: a mirror makes RAGFlow match your vault exactly."
+    ];
+    new MirrorConfirmModal(this.app, lines, () => void this.runMirror(plan)).open();
+  }
+  /** Execute a confirmed Mirror plan: uploads and record-clearing deletes first, then orphans. */
+  async runMirror(plan) {
+    if (this.busy)
+      return;
+    this.busy = true;
+    try {
+      const applied = await this.plugin.engine.applyChanges(
+        plan.changes,
+        (done, total, label) => this.setStatus(`Mirroring ${done}/${total}: ${label}`)
+      );
+      const removed = await this.plugin.engine.deleteOrphans(
+        plan.orphanDeletes,
+        (done, total, label) => this.setStatus(`${label} ${done}/${total}`)
+      );
+      let msg = `Mirror done: ${applied.ok} file(s) synced`;
+      if (removed.ok > 0)
+        msg += `, ${removed.ok} document(s) deleted`;
+      if (applied.parsed > 0)
+        msg += `, parsing ${applied.parsed}`;
+      const failed = applied.failed + removed.failed;
+      if (failed > 0)
+        msg += `, ${failed} failed`;
+      msg += ".";
+      new import_obsidian6.Notice(msg);
+      const errors = [...applied.errors, ...removed.errors];
+      if (errors.length > 0)
+        console.error("RAGFlow Sync mirror errors:", errors);
+    } catch (e) {
+      new import_obsidian6.Notice(`Mirror failed: ${e.message}`);
+    } finally {
+      this.busy = false;
+      await this.scan();
     }
   }
   /**
@@ -2107,7 +2365,7 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
       }
       const gone = new Set(result.deletedIds);
       this.orphans = this.orphans.filter((o) => !gone.has(o.documentId));
-      this.countLines = [];
+      this.counts = [];
       this.selectedOrphans.clear();
       this.render();
       this.setStatus(msg);
@@ -2255,6 +2513,9 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
       const reconcileBtn = toolbar.createEl("button", { text: "Reconcile" });
       reconcileBtn.title = "Compare against the documents actually in RAGFlow. A scan only compares your vault with the plugin's local record, so documents added or deleted on the RAGFlow side never show up in it.";
       reconcileBtn.onclick = () => void this.reconcile();
+      const mirrorBtn = toolbar.createEl("button", { text: "Mirror" });
+      mirrorBtn.title = "Make RAGFlow match your vault folders exactly: delete documents the folders do not account for, upload what is missing, leave the rest alone. Judged by filename rather than the plugin's local record, so it works even when that record is wrong. Confirms first.";
+      mirrorBtn.onclick = () => void this.mirror();
       this.syncSelectedBtn = toolbar.createEl("button", {
         text: "Sync selected"
       });
@@ -2274,13 +2535,24 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
       this.syncSelectedBtn.onclick = () => void this.syncSelected();
     }
   }
-  /** The per-dataset "remote N / tracked M" tallies from the last reconcile. */
+  /**
+   * The per-dataset tallies from the last reconcile, one line per dataset plus
+   * a note wherever a number needs explaining. The three counts answer
+   * different questions: RAGFlow below tracked means documents were lost
+   * remotely, tracked below vault means files were never uploaded.
+   */
   renderCounts(container) {
-    if (this.countLines.length === 0)
+    if (this.counts.length === 0)
       return;
     const box = container.createDiv({ cls: "ragflow-sync-counts" });
-    for (const line of this.countLines) {
-      box.createDiv({ cls: "ragflow-sync-count-line", text: line });
+    for (const c of this.counts) {
+      box.createDiv({
+        cls: "ragflow-sync-count-line",
+        text: `${c.datasetName}: ${c.remote} in RAGFlow / ${c.tracked} tracked / ${c.inScope} in vault`
+      });
+      for (const note of countNotes(c)) {
+        box.createDiv({ cls: "ragflow-sync-count-note", text: note });
+      }
     }
   }
   /**
@@ -2490,6 +2762,17 @@ var RagflowSyncPlugin = class extends import_obsidian7.Plugin {
           return;
         await view.scan();
         await view.reconcile();
+      }
+    });
+    this.addCommand({
+      id: "ragflow-mirror",
+      name: "Mirror vault to RAGFlow (delete extras, upload what is missing)",
+      callback: async () => {
+        const view = await this.activateView();
+        if (!view)
+          return;
+        await view.scan();
+        await view.mirror();
       }
     });
     this.addCommand({
