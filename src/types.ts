@@ -202,6 +202,23 @@ export interface DatasetFileTally {
 	distinctNames: number;
 }
 
+/**
+ * What a Mirror would do to make the datasets match their source folders.
+ * Computed and shown for confirmation before anything is sent, because it is
+ * the one action that deletes documents without being asked file by file.
+ */
+export interface MirrorPlan {
+	/**
+	 * Changes to run through a Sync apply run: uploads, plus the deletions that
+	 * own a Synced state record and so must clear it as well as the document.
+	 */
+	changes: FileChange[];
+	/** Documents no record points at, removed directly. */
+	orphanDeletes: RemoteOrphan[];
+	/** Files already correct on both sides, left untouched. */
+	kept: number;
+}
+
 /** An unfiltered point-in-time entry from the vault snapshot. */
 export interface VaultEntry {
 	path: string;

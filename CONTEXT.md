@@ -38,6 +38,10 @@ _Avoid_: remote diff, verify, audit.
 A dataset's counts across all three places a file can be counted — RAGFlow (`remote`), the **Synced state** (`tracked`), and the vault (`inScope`) — plus `distinctNames` and `skipped`. The three disagree for different reasons, so each gap carries its own note: remote below tracked is remote loss, tracked below in-scope is never-uploaded, in-scope above distinctNames is the flat-dataset name ceiling, and skipped is what scope rules drop.
 _Avoid_: counts, stats, numbers.
 
+**Mirror**:
+The action that makes a dataset match its source folder exactly, deciding by filename rather than through the **Synced state**: a document the folder does not account for is deleted, a file the dataset lacks is uploaded, a name on both sides is kept. Because it consults no local record, it is the recovery path when the **Synced state** is wrong or lost. It disregards **Ignore (snooze)**, and always confirms before executing.
+_Avoid_: sync, force sync, one-way sync, overwrite.
+
 **Orphan**:
 A RAGFlow document in a mapped dataset that no **Synced state** record points at and whose name matches no in-scope file routed to that dataset. Has no vault path, so it lives outside the change list and outside the folder tree. Deleted only by its own explicit action, never by "Sync all".
 _Avoid_: stray, leftover, untracked document.
@@ -87,6 +91,7 @@ _Avoid_: view state, UI helper.
 - A **Dataset mapping** defines part of what counts as **In-scope** and names the destination dataset.
 - The **Diff** consumes a **Vault snapshot** and the **Synced state** and emits **Change kind**s. It never reads RAGFlow, so remote-side drift is structurally invisible to it — that is the **Remote reconcile**'s job.
 - A **Remote reconcile** runs after the Diff, over its change list: it promotes `unchanged` entries to **Missing** and emits **Orphan**s alongside the change list. It also drops the **Ignore (snooze)** of anything it marks Missing, since a vault-side snooze cannot speak for a document that is gone.
+- A **Mirror** reads RAGFlow the same way a **Remote reconcile** does, but decides by name instead of by record, and then executes: its plan is a **Sync apply run** (uploads, plus the deletions that must clear a **Synced state** record) followed by direct deletes of the rest. Reconcile reports and lets the user pick; Mirror acts on the whole set at once, which is why it confirms first.
 - The **Deletion rule** is evaluated by the **Diff** against the in-scope subset of the **Vault snapshot**.
 - A **Touch refresh** updates the **Synced state** without producing a visible **Change kind** (it stays "unchanged").
 - An **Ignore (snooze)** is applied to the **Change kind**s after the **Diff** runs: it sets an `ignored` flag that drops the entry from the Scan diff list, while the **Deletion rule** still produces the underlying `deleted` kind beneath it.

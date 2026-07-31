@@ -163,6 +163,13 @@
 	font-size: var(--font-ui-smaller);
 }
 
+.ragflow-modal-buttons {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+	margin-top: 16px;
+}
+
 .ragflow-mapping-row {
 	display: flex;
 	gap: 6px;

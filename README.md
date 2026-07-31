@@ -412,6 +412,43 @@ hand in RAGFlow. It is also available as
 re-scans the vault afterwards, which clears the reconcile result — run
 `Reconcile` again if you want a fresh picture.
 
+### Mirroring A Folder Into RAGFlow
+
+`Reconcile` reports; `Mirror` acts. Click `Mirror` to make every mapped dataset
+match its source folder exactly, in one step:
+
+- a document the folder does not account for is **deleted**;
+- a file the dataset does not hold is **uploaded**;
+- a name present on both sides is **left alone** (unless its content changed,
+  in which case it re-uploads).
+
+The important difference from a scan or a reconcile is what it trusts. Those two
+reason through the plugin's local record of what it uploaded, so a lost or stale
+record misleads them. A mirror compares **filenames** — the set of in-scope files
+routed to a dataset against the set of documents actually in it — and lets that
+decide. That makes it the recovery path when the local record cannot be trusted
+at all: after restoring plugin data, moving to a new machine, or any time the
+numbers stopped making sense.
+
+Two things it still takes from the ordinary scan, because names cannot see them:
+a file whose *content* changed keeps its name, so the hash comparison is what
+catches it; and a vault file that is gone needs its local record cleared, not
+just its document deleted.
+
+A mirror always shows a confirmation with the counts first — how many files it
+will upload, how many documents it will delete, how many it will leave alone.
+Two warnings worth reading before you confirm:
+
+- **Deletions are not reversible.** If a mapped dataset holds documents that
+  legitimately did not come from this vault, a mirror deletes them. Use
+  `Reconcile` and the per-document `In RAGFlow only` list instead when you want
+  to choose case by case.
+- **Snoozed files are included.** Ignoring a file says "leave this one alone",
+  which cannot survive an instruction to make the dataset match the folder.
+
+It is also available as `RAGFlow Sync: Mirror vault to RAGFlow` in the command
+palette.
+
 ### Ignoring Files
 
 To stop specific files from ever syncing without removing them from a mapping,

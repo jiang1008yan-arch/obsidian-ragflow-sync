@@ -74,6 +74,17 @@ export default class RagflowSyncPlugin extends Plugin {
 		});
 
 		this.addCommand({
+			id: "ragflow-mirror",
+			name: "Mirror vault to RAGFlow (delete extras, upload what is missing)",
+			callback: async () => {
+				const view = await this.activateView();
+				if (!view) return;
+				await view.scan();
+				await view.mirror();
+			},
+		});
+
+		this.addCommand({
 			id: "ragflow-force-resync",
 			name: "Force re-sync all (re-upload everything)",
 			callback: async () => {

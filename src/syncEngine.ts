@@ -15,6 +15,7 @@ import {
 	skippedCount,
 	trackedCount,
 } from "./reconcile";
+import { mergeMirrorPlans, planMirrorForDataset } from "./mirror";
 import {
 	applySyncRun,
 	PROCESSING_VERSION,
@@ -28,6 +29,7 @@ import {
 	DiffResult,
 	FileChange,
 	IgnoreSnapshot,
+	MirrorPlan,
 	RagflowSyncSettings,
 	ReconcileResult,
 	RemoteOrphan,
@@ -261,6 +263,43 @@ export class SyncEngine {
 		await this.store.flush();
 
 		return { changes: marked.changes, orphans, counts, absentDatasets };
+	}
+
+	/**
+	 * Plan a Mirror: what it would take to make every mapped dataset match its
+	 * source folder, judged by name rather than through the synced state. Reads
+	 * RAGFlow exactly as reconcile does; sends nothing. The caller confirms the
+	 * plan before executing it.
+	 */
+	async planMirror(
+		changes: FileChange[],
+		onProgress?: (label: string) => void
+	): Promise<MirrorPlan> {
+		this.client.invalidate();
+
+		const names = [
+			...new Set(
+				this.getSettings()
+					.datasetMappings.map((m) => m.datasetName.trim())
+					.filter((n) => n.length > 0)
+			),
+		];
+
+		const plans: MirrorPlan[] = [];
+		for (const name of names) {
+			onProgress?.(`Reading "${name}" from RAGFlow...`);
+			const datasetId = await this.client.findDatasetId(name);
+			// A dataset that does not exist yet holds nothing: everything under it
+			// is an upload, and the upload path creates it.
+			const remoteDocs = datasetId
+				? await this.client.listDocuments(datasetId)
+				: [];
+			plans.push(
+				planMirrorForDataset(name, datasetId ?? "", remoteDocs, changes)
+			);
+		}
+
+		return mergeMirrorPlans(plans);
 	}
 
 	/**
