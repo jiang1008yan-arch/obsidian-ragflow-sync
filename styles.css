@@ -99,6 +99,10 @@
 	background-color: var(--color-red);
 }
 
+.ragflow-sync-view .ragflow-sync-badge.missing {
+	background-color: var(--color-orange);
+}
+
 .ragflow-sync-view .ragflow-sync-badge.unchanged {
 	background-color: var(--background-modifier-border);
 	color: var(--text-muted);
@@ -107,6 +111,38 @@
 .ragflow-sync-view .ragflow-sync-badge.ignored {
 	background-color: var(--background-modifier-border);
 	color: var(--text-faint);
+}
+
+.ragflow-sync-view .ragflow-sync-counts {
+	margin-top: 8px;
+	padding: 6px 8px;
+	border-radius: 4px;
+	background-color: var(--background-secondary);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+}
+
+.ragflow-sync-view .ragflow-sync-orphans {
+	margin-top: 8px;
+	padding: 6px 8px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 4px;
+}
+
+.ragflow-sync-view .ragflow-sync-orphans-header {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	padding-bottom: 4px;
+	border-bottom: 1px solid var(--background-modifier-border);
+	font-size: var(--font-ui-small);
+	font-weight: var(--font-semibold);
+}
+
+.ragflow-sync-view .ragflow-sync-orphans-header button {
+	flex: 0 0 auto;
+	padding: 0 8px;
+	font-size: var(--font-ui-smaller);
 }
 
 .ragflow-sync-view .ragflow-sync-empty {

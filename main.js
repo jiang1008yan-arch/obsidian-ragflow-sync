@@ -368,10 +368,10 @@ Content-Type: ${contentType}\r
 
 // src/ragflowClient.ts
 var PAGE_SIZE = 100;
-function isDuplicateName(candidate, baseName) {
-  const dot = baseName.lastIndexOf(".");
-  const stem = dot > 0 ? baseName.slice(0, dot) : baseName;
-  const ext = dot > 0 ? baseName.slice(dot) : "";
+function isDuplicateName(candidate, baseName2) {
+  const dot = baseName2.lastIndexOf(".");
+  const stem = dot > 0 ? baseName2.slice(0, dot) : baseName2;
+  const ext = dot > 0 ? baseName2.slice(dot) : "";
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`^${esc(stem)}(\\(\\d+\\))?${esc(ext)}$`).test(candidate);
 }
@@ -504,6 +504,50 @@ var RagflowClient = class {
       this.datasetIdByName.set(trimmed, found.id);
       return found.id;
     }
+  }
+  /**
+   * Resolve a dataset id by name *without* creating it. Returns undefined when
+   * no such dataset exists — the Remote reconcile needs to look at what RAGFlow
+   * actually holds, and must not conjure an empty dataset just by asking.
+   */
+  async findDatasetId(name) {
+    const trimmed = name.trim();
+    if (!trimmed)
+      return void 0;
+    const cached = this.datasetIdByName.get(trimmed);
+    if (cached)
+      return cached;
+    const found = (await this.listDatasets()).find((d) => d.name === trimmed);
+    if (!found)
+      return void 0;
+    this.datasetIdByName.set(trimmed, found.id);
+    return found.id;
+  }
+  /**
+   * Every document in a dataset, paginating fully. This is the only call that
+   * reads RAGFlow's actual contents wholesale; it backs the Remote reconcile,
+   * which is why it is deliberately not on the ordinary scan path (a dataset of
+   * N documents costs ceil(N/100) requests).
+   */
+  async listDocuments(datasetId) {
+    const all = [];
+    let page = 1;
+    while (true) {
+      const data = await this.send({
+        url: `${this.base()}/datasets/${datasetId}/documents${this.query({
+          page,
+          page_size: PAGE_SIZE
+        })}`,
+        method: "GET",
+        headers: this.headers()
+      });
+      const docs = data?.docs ?? [];
+      all.push(...docs);
+      if (docs.length < PAGE_SIZE)
+        break;
+      page += 1;
+    }
+    return all;
   }
   /**
    * Ids of documents in a dataset whose name collides with `name` — the name
@@ -823,6 +867,73 @@ function markIgnored(changes, ignoredEntries, currentHashes) {
   return { changes, staleIgnores, captured };
 }
 
+// src/reconcile.ts
+function baseName(vaultPath) {
+  const slash = vaultPath.lastIndexOf("/");
+  return slash < 0 ? vaultPath : vaultPath.slice(slash + 1);
+}
+function expectedNames(changes, datasetName) {
+  const names = /* @__PURE__ */ new Set();
+  for (const change of changes) {
+    if (change.kind === "deleted")
+      continue;
+    if (change.mapping?.datasetName !== datasetName)
+      continue;
+    names.add(baseName(change.vaultPath));
+  }
+  return names;
+}
+function reconcileDataset(datasetName, datasetId, remoteDocs, changes, trackedDocumentIds) {
+  const expected = expectedNames(changes, datasetName);
+  const remoteIds = new Set(remoteDocs.map((d) => d.id));
+  const orphans = [];
+  for (const doc of remoteDocs) {
+    if (!doc.id)
+      continue;
+    if (trackedDocumentIds.has(doc.id))
+      continue;
+    if (expected.has(doc.name))
+      continue;
+    orphans.push({
+      datasetName,
+      datasetId,
+      documentId: doc.id,
+      documentName: doc.name
+    });
+  }
+  const missingPaths = [];
+  for (const change of changes) {
+    if (change.kind !== "unchanged")
+      continue;
+    if (change.mapping?.datasetName !== datasetName)
+      continue;
+    const record = change.record;
+    if (!record)
+      continue;
+    if (record.datasetId !== datasetId || !remoteIds.has(record.documentId)) {
+      missingPaths.push(change.vaultPath);
+    }
+  }
+  return { orphans, missingPaths };
+}
+function markMissing(changes, missingPaths) {
+  const paths = new Set(missingPaths);
+  const unsnoozed = [];
+  for (const change of changes) {
+    if (!paths.has(change.vaultPath))
+      continue;
+    change.kind = "missing";
+    if (change.ignored) {
+      change.ignored = false;
+      unsnoozed.push(change.vaultPath);
+    }
+  }
+  return { changes, unsnoozed };
+}
+function trackedCount(files, datasetId) {
+  return Object.values(files).filter((r) => r.datasetId === datasetId).length;
+}
+
 // src/syncApplyRun.ts
 var import_obsidian4 = require("obsidian");
 
@@ -965,8 +1076,8 @@ function frontmatterLinkTargets(value) {
   visit(value);
   return out;
 }
-function splitPartStem(baseName) {
-  const m = /^(.+?)_p\d+(?:-\d+)?$/i.exec(baseName);
+function splitPartStem(baseName2) {
+  const m = /^(.+?)_p\d+(?:-\d+)?$/i.exec(baseName2);
   return m ? m[1] : null;
 }
 function normalizeMeta(parsed) {
@@ -1196,7 +1307,7 @@ var SyncApplyRun = class {
     try {
       for (const change of actionable) {
         try {
-          if (change.kind === "new") {
+          if (change.kind === "new" || change.kind === "missing") {
             const up = await this.syncUpload(change, void 0, companionIndex);
             this.recordUpload(uploaded, up);
             if (up.error)
@@ -1483,6 +1594,7 @@ var ObsidianVaultAccess = class {
 };
 
 // src/syncEngine.ts
+var ORPHAN_DELETE_BATCH = 100;
 var SyncEngine = class {
   constructor(app, client, store, getSettings, vault = new ObsidianVaultAccess(app)) {
     this.vault = vault;
@@ -1582,6 +1694,101 @@ var SyncEngine = class {
     const hash = await this.hashPath(path);
     return { hash, size: file.stat.size, mtime: file.stat.mtime };
   }
+  /**
+   * Remote reconcile: compare what RAGFlow actually holds in every mapped
+   * dataset against this change list and the synced state.
+   *
+   * This is the only read of RAGFlow's contents, and it is a separate step from
+   * computeDiff on purpose — it costs a full paginated document listing per
+   * dataset, where a scan costs nothing but local IO. It mutates the change
+   * list it is given, promoting remotely-missing files to "missing", and
+   * returns the documents nothing in the vault accounts for.
+   */
+  async reconcile(changes, onProgress) {
+    this.client.invalidate();
+    const names = [
+      ...new Set(
+        this.getSettings().datasetMappings.map((m) => m.datasetName.trim()).filter((n) => n.length > 0)
+      )
+    ];
+    const trackedIds = new Set(
+      Object.values(this.store.allFiles()).map((r) => r.documentId)
+    );
+    const orphans = [];
+    const counts = [];
+    const absentDatasets = [];
+    const missingPaths = [];
+    for (const name of names) {
+      onProgress?.(`Reading "${name}" from RAGFlow...`);
+      const datasetId = await this.client.findDatasetId(name);
+      if (!datasetId) {
+        absentDatasets.push(name);
+        continue;
+      }
+      const remoteDocs = await this.client.listDocuments(datasetId);
+      const result = reconcileDataset(
+        name,
+        datasetId,
+        remoteDocs,
+        changes,
+        trackedIds
+      );
+      orphans.push(...result.orphans);
+      missingPaths.push(...result.missingPaths);
+      counts.push({
+        datasetName: name,
+        remote: remoteDocs.length,
+        tracked: trackedCount(this.store.allFiles(), datasetId)
+      });
+    }
+    const settings = this.getSettings();
+    const marked = markMissing(changes, missingPaths);
+    for (const path of marked.unsnoozed)
+      delete settings.ignoredEntries[path];
+    await this.store.flush();
+    return { changes: marked.changes, orphans, counts, absentDatasets };
+  }
+  /**
+   * Delete orphaned documents from RAGFlow, batched per dataset. Nothing in the
+   * synced state refers to them, so there is no local record to clean up.
+   */
+  async deleteOrphans(orphans, onProgress) {
+    const byDataset = /* @__PURE__ */ new Map();
+    for (const orphan of orphans) {
+      const list = byDataset.get(orphan.datasetId);
+      if (list)
+        list.push(orphan);
+      else
+        byDataset.set(orphan.datasetId, [orphan]);
+    }
+    const result = {
+      ok: 0,
+      failed: 0,
+      errors: [],
+      deletedIds: []
+    };
+    let done = 0;
+    for (const [datasetId, group] of byDataset) {
+      const name = group[0].datasetName;
+      for (let i = 0; i < group.length; i += ORPHAN_DELETE_BATCH) {
+        const batch = group.slice(i, i + ORPHAN_DELETE_BATCH);
+        onProgress?.(done, orphans.length, `Deleting from "${name}"...`);
+        try {
+          await this.client.deleteDocuments(
+            datasetId,
+            batch.map((o) => o.documentId)
+          );
+          result.ok += batch.length;
+          result.deletedIds.push(...batch.map((o) => o.documentId));
+        } catch (e) {
+          result.failed += batch.length;
+          result.errors.push(`${name}: ${e.message}`);
+        }
+        done += batch.length;
+      }
+    }
+    return result;
+  }
   async applyChanges(changes, onProgress) {
     return applySyncRun({
       vault: this.vault,
@@ -1599,7 +1806,8 @@ function summarize(changes) {
     new: 0,
     modified: 0,
     deleted: 0,
-    unchanged: 0
+    unchanged: 0,
+    missing: 0
   };
   for (const c of changes)
     counts[c.kind] += 1;
@@ -1655,7 +1863,8 @@ function changeSummary(leaves) {
     new: 0,
     modified: 0,
     deleted: 0,
-    unchanged: 0
+    unchanged: 0,
+    missing: 0
   };
   let ignored = 0;
   for (const leaf of leaves) {
@@ -1673,6 +1882,8 @@ function changeSummary(leaves) {
     parts.push(`${counts.modified} modified`);
   if (counts.deleted)
     parts.push(`${counts.deleted} deleted`);
+  if (counts.missing)
+    parts.push(`${counts.missing} missing`);
   if (ignored)
     parts.push(`${ignored} ignored`);
   return parts.join(", ");
@@ -1729,24 +1940,34 @@ var KIND_LABEL = {
   new: "New",
   modified: "Modified",
   deleted: "Deleted",
-  unchanged: "Up to date"
+  unchanged: "Up to date",
+  missing: "Missing in RAGFlow"
 };
 var RagflowSyncView = class extends import_obsidian6.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     /** The full diff: every in-scope file (all kinds) plus deletions. */
     this.changes = [];
+    /** RAGFlow documents nothing in the vault accounts for; empty until a reconcile. */
+    this.orphans = [];
+    /** Per-dataset "remote N / tracked M" lines from the last reconcile. */
+    this.countLines = [];
     this.statusEl = null;
+    /** Whether a scan has completed, as distinct from having found changes. */
+    this.scanned = false;
     this.busy = false;
     /** Which tab is showing: the Scan-diff list or the full Sync picker. */
     this.activeTab = "diff";
     /** Vault paths ticked in the current tab. Reset when the tab changes. */
     this.selected = /* @__PURE__ */ new Set();
+    /** Orphan document ids ticked for deletion. Reset by every scan/reconcile. */
+    this.selectedOrphans = /* @__PURE__ */ new Set();
     /** Folder paths currently expanded in the tree. */
     this.expanded = /* @__PURE__ */ new Set();
     /** Selection-dependent buttons, kept so their labels can update live. */
     this.syncSelectedBtn = null;
     this.ignoreSelectedBtn = null;
+    this.deleteOrphansBtn = null;
     this.plugin = plugin;
   }
   getViewType() {
@@ -1779,7 +2000,9 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
     try {
       const result = await this.plugin.engine.computeDiff();
       this.changes = result.changes;
+      this.scanned = true;
       this.selected.clear();
+      this.clearReconcile();
       this.expanded = foldersWithChanges(this.changes);
       if (result.missingMappings.length > 0) {
         new import_obsidian6.Notice(
@@ -1794,6 +2017,102 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
     } catch (e) {
       new import_obsidian6.Notice(`Scan failed: ${e.message}`);
       this.setStatus(`Scan failed: ${e.message}`);
+    } finally {
+      this.busy = false;
+    }
+  }
+  clearReconcile() {
+    this.orphans = [];
+    this.countLines = [];
+    this.selectedOrphans.clear();
+  }
+  /**
+   * Remote reconcile: ask RAGFlow what it actually holds and fold the answer
+   * into the current scan. A plain scan compares the vault with the local
+   * synced state only, so drift on the RAGFlow side — documents uploaded
+   * outside the plugin, leftovers from a lost synced state, "name(n).ext"
+   * duplicates, documents deleted in the RAGFlow UI — is invisible to it and
+   * only shows up here.
+   */
+  async reconcile() {
+    if (this.busy)
+      return;
+    if (!this.plugin.settings.apiKey) {
+      new import_obsidian6.Notice("Set your RAGFlow API key in settings first.");
+      return;
+    }
+    if (!this.scanned)
+      await this.scan();
+    if (!this.scanned)
+      return;
+    this.busy = true;
+    this.setStatus("Reconciling with RAGFlow...");
+    try {
+      const result = await this.plugin.engine.reconcile(
+        this.changes,
+        (label) => this.setStatus(label)
+      );
+      this.changes = result.changes;
+      this.orphans = result.orphans;
+      this.selectedOrphans.clear();
+      this.countLines = result.counts.map(
+        (c) => `${c.datasetName}: ${c.remote} in RAGFlow / ${c.tracked} tracked`
+      );
+      await this.plugin.saveSettings();
+      this.expanded = foldersWithChanges(this.changes);
+      this.render();
+      const missing = summarize(this.changes).missing;
+      const parts = [`${this.orphans.length} orphaned document(s) in RAGFlow`];
+      if (missing > 0)
+        parts.push(`${missing} file(s) missing from RAGFlow`);
+      if (result.absentDatasets.length > 0) {
+        parts.push(`dataset(s) not found: ${result.absentDatasets.join(", ")}`);
+      }
+      this.setStatus(`Reconcile complete: ${parts.join(", ")}.`);
+    } catch (e) {
+      new import_obsidian6.Notice(`Reconcile failed: ${e.message}`);
+      this.setStatus(`Reconcile failed: ${e.message}`);
+    } finally {
+      this.busy = false;
+    }
+  }
+  /**
+   * Delete the ticked orphans from RAGFlow. Deliberately its own action rather
+   * than part of "Sync all": a mapped dataset may legitimately hold documents
+   * that did not come from this vault, and those must not be swept away by the
+   * ordinary sync button.
+   */
+  async deleteSelectedOrphans() {
+    if (this.busy)
+      return;
+    const picked = this.orphans.filter(
+      (o) => this.selectedOrphans.has(o.documentId)
+    );
+    if (picked.length === 0) {
+      new import_obsidian6.Notice("Tick the orphaned documents you want to delete.");
+      return;
+    }
+    this.busy = true;
+    try {
+      const result = await this.plugin.engine.deleteOrphans(
+        picked,
+        (done, total, label) => this.setStatus(`${label} ${done}/${total}`)
+      );
+      let msg = `Deleted ${result.ok} orphaned document(s).`;
+      if (result.failed > 0)
+        msg += ` ${result.failed} failed.`;
+      new import_obsidian6.Notice(msg);
+      if (result.errors.length > 0) {
+        console.error("RAGFlow Sync orphan delete errors:", result.errors);
+      }
+      const gone = new Set(result.deletedIds);
+      this.orphans = this.orphans.filter((o) => !gone.has(o.documentId));
+      this.countLines = [];
+      this.selectedOrphans.clear();
+      this.render();
+      this.setStatus(msg);
+    } catch (e) {
+      new import_obsidian6.Notice(`Delete failed: ${e.message}`);
     } finally {
       this.busy = false;
     }
@@ -1885,10 +2204,15 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
     container.addClass("ragflow-sync-view");
     this.syncSelectedBtn = null;
     this.ignoreSelectedBtn = null;
+    this.deleteOrphansBtn = null;
     this.renderTabs(container.createDiv({ cls: "ragflow-sync-tabs" }));
     const toolbar = container.createDiv({ cls: "ragflow-sync-toolbar" });
     this.renderToolbar(toolbar);
     this.statusEl = container.createDiv({ cls: "ragflow-sync-status" });
+    if (this.activeTab === "diff") {
+      this.renderCounts(container);
+      this.renderOrphans(container);
+    }
     const data = this.tabData();
     if (this.changes.length === 0) {
       container.createDiv({
@@ -1928,6 +2252,9 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
     if (this.activeTab === "diff") {
       const scanBtn = toolbar.createEl("button", { text: "Scan diff" });
       scanBtn.onclick = () => void this.scan();
+      const reconcileBtn = toolbar.createEl("button", { text: "Reconcile" });
+      reconcileBtn.title = "Compare against the documents actually in RAGFlow. A scan only compares your vault with the plugin's local record, so documents added or deleted on the RAGFlow side never show up in it.";
+      reconcileBtn.onclick = () => void this.reconcile();
       this.syncSelectedBtn = toolbar.createEl("button", {
         text: "Sync selected"
       });
@@ -1945,6 +2272,64 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
       });
       this.syncSelectedBtn.addClass("mod-cta");
       this.syncSelectedBtn.onclick = () => void this.syncSelected();
+    }
+  }
+  /** The per-dataset "remote N / tracked M" tallies from the last reconcile. */
+  renderCounts(container) {
+    if (this.countLines.length === 0)
+      return;
+    const box = container.createDiv({ cls: "ragflow-sync-counts" });
+    for (const line of this.countLines) {
+      box.createDiv({ cls: "ragflow-sync-count-line", text: line });
+    }
+  }
+  /**
+   * Orphaned RAGFlow documents, listed outside the file tree because they have
+   * no vault path to hang under — they exist only on the RAGFlow side.
+   */
+  renderOrphans(container) {
+    if (this.orphans.length === 0)
+      return;
+    const section = container.createDiv({ cls: "ragflow-sync-orphans" });
+    const header = section.createDiv({ cls: "ragflow-sync-orphans-header" });
+    const all = header.createEl("input", { type: "checkbox" });
+    all.checked = this.selectedOrphans.size === this.orphans.length;
+    all.indeterminate = this.selectedOrphans.size > 0 && this.selectedOrphans.size < this.orphans.length;
+    all.onchange = () => {
+      this.selectedOrphans.clear();
+      if (all.checked) {
+        for (const o of this.orphans)
+          this.selectedOrphans.add(o.documentId);
+      }
+      this.render();
+    };
+    header.createDiv({
+      cls: "ragflow-tree-name",
+      text: `In RAGFlow only (${this.orphans.length})`
+    });
+    this.deleteOrphansBtn = header.createEl("button", {
+      text: "Delete from RAGFlow"
+    });
+    this.deleteOrphansBtn.addClass("mod-warning");
+    this.deleteOrphansBtn.onclick = () => void this.deleteSelectedOrphans();
+    for (const orphan of this.orphans) {
+      const row = section.createDiv({
+        cls: "ragflow-tree-row ragflow-tree-file"
+      });
+      const box = row.createEl("input", { type: "checkbox" });
+      box.checked = this.selectedOrphans.has(orphan.documentId);
+      box.onchange = () => {
+        if (box.checked)
+          this.selectedOrphans.add(orphan.documentId);
+        else
+          this.selectedOrphans.delete(orphan.documentId);
+        this.render();
+      };
+      row.createDiv({ cls: "ragflow-tree-name", text: orphan.documentName });
+      row.createSpan({
+        cls: "ragflow-tree-count",
+        text: orphan.datasetName
+      });
     }
   }
   /** Render the folders-then-files under a node, sorted, at the given depth. */
@@ -2040,6 +2425,13 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
       );
       this.ignoreSelectedBtn.disabled = n === 0;
     }
+    if (this.deleteOrphansBtn) {
+      const picked = this.selectedOrphans.size;
+      this.deleteOrphansBtn.setText(
+        picked > 0 ? `Delete ${picked} from RAGFlow` : "Delete from RAGFlow"
+      );
+      this.deleteOrphansBtn.disabled = picked === 0;
+    }
   }
 };
 
@@ -2087,6 +2479,17 @@ var RagflowSyncPlugin = class extends import_obsidian7.Plugin {
           return;
         await view.scan();
         await view.syncAll();
+      }
+    });
+    this.addCommand({
+      id: "ragflow-reconcile",
+      name: "Reconcile with RAGFlow (find orphaned/missing documents)",
+      callback: async () => {
+        const view = await this.activateView();
+        if (!view)
+          return;
+        await view.scan();
+        await view.reconcile();
       }
     });
     this.addCommand({

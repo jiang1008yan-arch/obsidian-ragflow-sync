@@ -27,8 +27,20 @@ The pure classification of a vault snapshot against synced state into changes; r
 _Avoid_: comparison, reconcile.
 
 **Change kind**:
-The category assigned to a vault path by the Diff: new, modified, deleted, or unchanged.
+The category assigned to a vault path by the Diff: new, modified, deleted, or unchanged — plus `missing`, which only a **Remote reconcile** can produce.
 _Avoid_: status, state, action.
+
+**Remote reconcile**:
+The comparison of what RAGFlow actually holds in each mapped dataset against the change list and the **Synced state**. Separate from the Diff and never run as part of a scan, because it costs a fully paginated document listing per dataset. It is the only read of RAGFlow's contents, and the only thing that can see remote-side drift.
+_Avoid_: remote diff, verify, audit.
+
+**Orphan**:
+A RAGFlow document in a mapped dataset that no **Synced state** record points at and whose name matches no in-scope file routed to that dataset. Has no vault path, so it lives outside the change list and outside the folder tree. Deleted only by its own explicit action, never by "Sync all".
+_Avoid_: stray, leftover, untracked document.
+
+**Missing**:
+The **Change kind** for a file that is unchanged locally but whose tracked document is absent from its dataset — deleted in the RAGFlow UI, stranded by a recreated dataset, or overwritten by a same-named upload. Applied as an upload with no prior document to delete.
+_Avoid_: gone, lost, absent.
 
 **Deletion rule**:
 The single rule that any synced-state record whose path is not in the in-scope snapshot is a deletion — covering files that are gone, filtered out, or under a removed mapping (full unmirror).
@@ -69,7 +81,8 @@ _Avoid_: view state, UI helper.
 ## Relationships
 
 - A **Dataset mapping** defines part of what counts as **In-scope** and names the destination dataset.
-- The **Diff** consumes a **Vault snapshot** and the **Synced state** and emits **Change kind**s.
+- The **Diff** consumes a **Vault snapshot** and the **Synced state** and emits **Change kind**s. It never reads RAGFlow, so remote-side drift is structurally invisible to it — that is the **Remote reconcile**'s job.
+- A **Remote reconcile** runs after the Diff, over its change list: it promotes `unchanged` entries to **Missing** and emits **Orphan**s alongside the change list. It also drops the **Ignore (snooze)** of anything it marks Missing, since a vault-side snooze cannot speak for a document that is gone.
 - The **Deletion rule** is evaluated by the **Diff** against the in-scope subset of the **Vault snapshot**.
 - A **Touch refresh** updates the **Synced state** without producing a visible **Change kind** (it stays "unchanged").
 - An **Ignore (snooze)** is applied to the **Change kind**s after the **Diff** runs: it sets an `ignored` flag that drops the entry from the Scan diff list, while the **Deletion rule** still produces the underlying `deleted` kind beneath it.
@@ -90,6 +103,8 @@ _Avoid_: view state, UI helper.
 > **Maintainer:** "Stats drift, so it lands in the hash pass. Hash matches, so it's 'unchanged' for the panel, but we write a **Touch refresh** so the next **Diff** skips re-hashing it."
 > **Dev:** "If I ignore a deleted entry, does it disappear from Scan diff?"
 > **Maintainer:** "Yes — **Ignore (snooze)** hides it from the New/Modified/Deleted list and leaves it out of 'Sync all', so the RAGFlow document is kept. It's still tracked, and only re-surfaces if a file reappears at that path. The file remains pickable (badge-free) in the Sync tab."
+> **Dev:** "The dataset has more documents than the vault has files, but Scan diff shows nothing. Bug?"
+> **Maintainer:** "No — by construction. The **Diff** only ever compares the **Vault snapshot** with the **Synced state**; a document we never recorded doesn't exist as far as it's concerned. Run a **Remote reconcile** and it comes back as an **Orphan**."
 
 ## Flagged ambiguities
 

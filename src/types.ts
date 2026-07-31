@@ -106,9 +106,19 @@ export interface SyncState {
 	files: Record<string, SyncedFileRecord>;
 }
 
-export type ChangeKind = "new" | "modified" | "deleted" | "unchanged";
+export type ChangeKind =
+	| "new"
+	| "modified"
+	| "deleted"
+	| "unchanged"
+	| "missing";
 
 export interface FileChange {
+	/**
+	 * What should happen to this path. "missing" is only ever produced by a
+	 * Remote reconcile: the file is unchanged locally, but its document is gone
+	 * from RAGFlow, so it must be re-uploaded.
+	 */
 	kind: ChangeKind;
 	/** Vault path (for deleted, this is the path that no longer exists). */
 	vaultPath: string;
@@ -131,6 +141,44 @@ export interface DiffResult {
 	changes: FileChange[];
 	/** Mappings whose vaultPath does not exist in the vault. */
 	missingMappings: DatasetMapping[];
+}
+
+/**
+ * A RAGFlow document in a mapped dataset that nothing in the vault accounts
+ * for: no synced-state record points at it, and its name matches no in-scope
+ * file heading for that dataset. The Diff cannot see these — it only reads the
+ * vault and the synced state — so they surface from a Remote reconcile.
+ */
+export interface RemoteOrphan {
+	datasetName: string;
+	datasetId: string;
+	documentId: string;
+	documentName: string;
+}
+
+/** What a Remote reconcile found in one dataset. */
+export interface DatasetReconciliation {
+	orphans: RemoteOrphan[];
+	/** Vault paths whose tracked document is no longer in the dataset. */
+	missingPaths: string[];
+}
+
+/** The outcome of reconciling every mapped dataset against RAGFlow. */
+export interface ReconcileResult {
+	/** The change list with remotely-missing files promoted to "missing". */
+	changes: FileChange[];
+	orphans: RemoteOrphan[];
+	/** Per-dataset document tallies, for the "remote 128 / tracked 120" line. */
+	counts: DatasetCount[];
+	/** Mapped dataset names that do not exist in RAGFlow at all. */
+	absentDatasets: string[];
+}
+
+/** What RAGFlow holds for a dataset versus what the synced state tracks in it. */
+export interface DatasetCount {
+	datasetName: string;
+	remote: number;
+	tracked: number;
 }
 
 /** An unfiltered point-in-time entry from the vault snapshot. */
