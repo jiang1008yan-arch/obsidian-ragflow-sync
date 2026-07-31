@@ -44,7 +44,7 @@ export default class RagflowSyncPlugin extends Plugin {
 
 		this.addCommand({
 			id: "ragflow-scan-diff",
-			name: "Scan for differences",
+			name: "Scan (vault and RAGFlow)",
 			callback: async () => {
 				const view = await this.activateView();
 				await view?.scan();
@@ -59,17 +59,6 @@ export default class RagflowSyncPlugin extends Plugin {
 				if (!view) return;
 				await view.scan();
 				await view.syncAll();
-			},
-		});
-
-		this.addCommand({
-			id: "ragflow-reconcile",
-			name: "Reconcile with RAGFlow (find orphaned/missing documents)",
-			callback: async () => {
-				const view = await this.activateView();
-				if (!view) return;
-				await view.scan();
-				await view.reconcile();
 			},
 		});
 

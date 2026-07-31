@@ -84,8 +84,10 @@ export class RagflowSyncView extends ItemView {
 	private changes: FileChange[] = [];
 	/** RAGFlow documents nothing in the vault accounts for; empty until a reconcile. */
 	private orphans: RemoteOrphan[] = [];
-	/** Per-dataset tallies from the last reconcile. */
+	/** Per-dataset tallies from the last scan's RAGFlow check. */
 	private counts: DatasetCount[] = [];
+	/** Why the RAGFlow half of the scan is missing or incomplete, if it is. */
+	private remoteNote: string | null = null;
 	private statusEl: HTMLElement | null = null;
 	/** Whether a scan has completed, as distinct from having found changes. */
 	private scanned = false;
@@ -99,8 +101,7 @@ export class RagflowSyncView extends ItemView {
 	/** Folder paths currently expanded in the tree. */
 	private expanded: Set<string> = new Set();
 	/** Selection-dependent buttons, kept so their labels can update live. */
-	private syncSelectedBtn: HTMLButtonElement | null = null;
-	private ignoreSelectedBtn: HTMLButtonElement | null = null;
+	private syncBtn: HTMLButtonElement | null = null;
 	private deleteOrphansBtn: HTMLButtonElement | null = null;
 
 	constructor(leaf: WorkspaceLeaf, plugin: RagflowSyncPlugin) {
@@ -132,25 +133,29 @@ export class RagflowSyncView extends ItemView {
 		if (this.statusEl) this.statusEl.setText(text);
 	}
 
+	/**
+	 * One scan answers everything: what changed locally, and what the RAGFlow
+	 * datasets actually hold.
+	 *
+	 * The remote half used to be a second button the user had to know to press,
+	 * which made a mismatched document count look like the plugin was failing to
+	 * notice it. Reading every mapped dataset costs one request per hundred
+	 * documents — seconds, not minutes — so there is no reason to make it opt-in.
+	 * When RAGFlow cannot be reached the local half still stands on its own and
+	 * is shown with a warning, rather than failing the whole scan.
+	 */
 	async scan(): Promise<void> {
 		if (this.busy) return;
-		if (!this.plugin.settings.apiKey) {
-			new Notice("Set your RAGFlow API key in settings first.");
-			return;
-		}
 		this.busy = true;
-		this.setStatus("Scanning for differences...");
+		this.setStatus("Scanning your vault...");
 		try {
 			const result = await this.plugin.engine.computeDiff();
 			this.changes = result.changes;
 			this.scanned = true;
-			// A fresh scan is a clean slate: drop any prior selection and expand the
-			// folders that hold visible entries so they are visible at a glance. The
-			// previous reconcile result is discarded with it — these changes were
-			// classified without consulting RAGFlow, so its findings no longer apply.
+			// A fresh scan is a clean slate: drop any prior selection and the
+			// previous remote findings, which were about a since-replaced list.
 			this.selected.clear();
-			this.clearReconcile();
-			this.expanded = foldersWithChanges(this.changes);
+			this.clearRemote();
 			if (result.missingMappings.length > 0) {
 				new Notice(
 					`Some mapped folders were not found: ${result.missingMappings
@@ -158,11 +163,12 @@ export class RagflowSyncView extends ItemView {
 						.join(", ")}`
 				);
 			}
+
+			await this.checkRemote();
+
+			this.expanded = foldersWithChanges(this.changes);
 			this.render();
-			const counts = summarize(this.changes);
-			this.setStatus(
-				`Scan complete: ${counts.new} new, ${counts.modified} modified, ${counts.deleted} deleted, ${counts.unchanged} up to date.`
-			);
+			this.setStatus(this.scanSummary());
 		} catch (e) {
 			new Notice(`Scan failed: ${(e as Error).message}`);
 			this.setStatus(`Scan failed: ${(e as Error).message}`);
@@ -171,58 +177,59 @@ export class RagflowSyncView extends ItemView {
 		}
 	}
 
-	private clearReconcile(): void {
-		this.orphans = [];
-		this.counts = [];
-		this.selectedOrphans.clear();
-	}
-
 	/**
-	 * Remote reconcile: ask RAGFlow what it actually holds and fold the answer
-	 * into the current scan. A plain scan compares the vault with the local
-	 * synced state only, so drift on the RAGFlow side — documents uploaded
-	 * outside the plugin, leftovers from a lost synced state, "name(n).ext"
-	 * duplicates, documents deleted in the RAGFlow UI — is invisible to it and
-	 * only shows up here.
+	 * The RAGFlow half of a scan. Never throws: a connection problem downgrades
+	 * the scan to its local half with an explanation, because "here is what
+	 * changed on disk" is still worth showing when the server is unreachable.
 	 */
-	async reconcile(): Promise<void> {
-		if (this.busy) return;
+	private async checkRemote(): Promise<void> {
 		if (!this.plugin.settings.apiKey) {
-			new Notice("Set your RAGFlow API key in settings first.");
+			this.remoteNote =
+				"No API key set, so RAGFlow was not checked — the list below reflects " +
+				"the plugin's local record only.";
 			return;
 		}
-		// Gate on "has a scan run", not "did it find anything": a vault with no
-		// in-scope files at all is precisely when a dataset full of orphans matters.
-		if (!this.scanned) await this.scan();
-		if (!this.scanned) return;
-
-		this.busy = true;
-		this.setStatus("Reconciling with RAGFlow...");
 		try {
 			const result = await this.plugin.engine.reconcile(this.changes, (label) =>
 				this.setStatus(label)
 			);
 			this.changes = result.changes;
 			this.orphans = result.orphans;
-			this.selectedOrphans.clear();
 			this.counts = result.counts;
 			await this.plugin.saveSettings();
-			this.expanded = foldersWithChanges(this.changes);
-			this.render();
-
-			const missing = summarize(this.changes).missing;
-			const parts = [`${this.orphans.length} orphaned document(s) in RAGFlow`];
-			if (missing > 0) parts.push(`${missing} file(s) missing from RAGFlow`);
 			if (result.absentDatasets.length > 0) {
-				parts.push(`dataset(s) not found: ${result.absentDatasets.join(", ")}`);
+				this.remoteNote = `Not found in RAGFlow yet: ${result.absentDatasets.join(
+					", "
+				)}. They are created on the first sync.`;
 			}
-			this.setStatus(`Reconcile complete: ${parts.join(", ")}.`);
 		} catch (e) {
-			new Notice(`Reconcile failed: ${(e as Error).message}`);
-			this.setStatus(`Reconcile failed: ${(e as Error).message}`);
-		} finally {
-			this.busy = false;
+			this.remoteNote =
+				`Could not read RAGFlow (${(e as Error).message}) — the list below ` +
+				`reflects the plugin's local record only, so documents added or ` +
+				`deleted on the RAGFlow side are not accounted for.`;
 		}
+	}
+
+	private scanSummary(): string {
+		const counts = summarize(this.changes);
+		const parts = [
+			`${counts.new} new`,
+			`${counts.modified} modified`,
+			`${counts.deleted} deleted`,
+		];
+		if (counts.missing > 0) parts.push(`${counts.missing} missing from RAGFlow`);
+		if (this.orphans.length > 0) {
+			parts.push(`${this.orphans.length} only in RAGFlow`);
+		}
+		parts.push(`${counts.unchanged} up to date`);
+		return `Scan complete: ${parts.join(", ")}.`;
+	}
+
+	private clearRemote(): void {
+		this.orphans = [];
+		this.counts = [];
+		this.remoteNote = null;
+		this.selectedOrphans.clear();
 	}
 
 	/**
@@ -445,8 +452,7 @@ export class RagflowSyncView extends ItemView {
 		container.empty();
 		container.addClass("ragflow-sync-view");
 
-		this.syncSelectedBtn = null;
-		this.ignoreSelectedBtn = null;
+		this.syncBtn = null;
 		this.deleteOrphansBtn = null;
 
 		this.renderTabs(container.createDiv({ cls: "ragflow-sync-tabs" }));
@@ -457,6 +463,12 @@ export class RagflowSyncView extends ItemView {
 		this.statusEl = container.createDiv({ cls: "ragflow-sync-status" });
 
 		if (this.activeTab === "diff") {
+			if (this.remoteNote) {
+				container.createDiv({
+					cls: "ragflow-sync-warning",
+					text: this.remoteNote,
+				});
+			}
 			this.renderCounts(container);
 			this.renderOrphans(container);
 		}
@@ -465,7 +477,7 @@ export class RagflowSyncView extends ItemView {
 		if (this.changes.length === 0) {
 			container.createDiv({
 				cls: "ragflow-sync-empty",
-				text: 'No scan results yet. Click "Scan diff" to compare your vault with RAGFlow.',
+				text: 'No results yet. Click "Scan" to compare your vault with RAGFlow.',
 			});
 		} else if (data.length === 0) {
 			container.createDiv({
@@ -473,7 +485,7 @@ export class RagflowSyncView extends ItemView {
 				text:
 					this.activeTab === "diff"
 						? "Everything is up to date."
-						: "No in-scope files to show.",
+						: "No files in scope. Check your dataset mappings in settings.",
 			});
 		} else {
 			const tree = container.createDiv({ cls: "ragflow-sync-tree" });
@@ -498,50 +510,55 @@ export class RagflowSyncView extends ItemView {
 				if (id === "sync" && this.changes.length === 0) void this.scan();
 			};
 		};
-		tab("diff", "Scan diff");
-		tab("sync", "Sync");
+		// Named for what each lists, not for an action — the toolbar owns the verbs.
+		tab("diff", "Changes");
+		tab("sync", "All files");
 	}
 
+	/**
+	 * Three controls, not six. One scan covers both halves of the comparison, one
+	 * sync button follows the selection instead of pairing "all" with "selected",
+	 * and "Ignore" only appears once there is a selection to ignore. Mirror is a
+	 * rare recovery action that deletes in bulk, so it lives in the command
+	 * palette rather than one click away from the everyday buttons.
+	 */
 	private renderToolbar(toolbar: HTMLElement): void {
 		if (this.activeTab === "diff") {
-			const scanBtn = toolbar.createEl("button", { text: "Scan diff" });
+			const scanBtn = toolbar.createEl("button", { text: "Scan" });
+			scanBtn.title =
+				"Compare your vault against RAGFlow: what changed locally, and what " +
+				"the datasets actually hold.";
 			scanBtn.onclick = () => void this.scan();
-
-			const reconcileBtn = toolbar.createEl("button", { text: "Reconcile" });
-			reconcileBtn.title =
-				"Compare against the documents actually in RAGFlow. A scan only " +
-				"compares your vault with the plugin's local record, so documents " +
-				"added or deleted on the RAGFlow side never show up in it.";
-			reconcileBtn.onclick = () => void this.reconcile();
-
-			const mirrorBtn = toolbar.createEl("button", { text: "Mirror" });
-			mirrorBtn.title =
-				"Make RAGFlow match your vault folders exactly: delete documents " +
-				"the folders do not account for, upload what is missing, leave the " +
-				"rest alone. Judged by filename rather than the plugin's local " +
-				"record, so it works even when that record is wrong. Confirms first.";
-			mirrorBtn.onclick = () => void this.mirror();
-
-			this.syncSelectedBtn = toolbar.createEl("button", {
-				text: "Sync selected",
-			});
-			this.syncSelectedBtn.addClass("mod-cta");
-			this.syncSelectedBtn.onclick = () => void this.syncSelected();
-
-			const syncAllBtn = toolbar.createEl("button", { text: "Sync all" });
-			syncAllBtn.onclick = () => void this.syncAll();
-
-			this.ignoreSelectedBtn = toolbar.createEl("button", {
-				text: "Ignore selected",
-			});
-			this.ignoreSelectedBtn.onclick = () => void this.ignoreSelected();
-		} else {
-			this.syncSelectedBtn = toolbar.createEl("button", {
-				text: "Sync selected",
-			});
-			this.syncSelectedBtn.addClass("mod-cta");
-			this.syncSelectedBtn.onclick = () => void this.syncSelected();
 		}
+
+		this.syncBtn = toolbar.createEl("button", { text: "Sync" });
+		this.syncBtn.addClass("mod-cta");
+		this.syncBtn.onclick = () => void this.syncFromToolbar();
+
+		// Only meaningful with a selection, so it stays out of the way until then.
+		if (this.activeTab === "diff" && this.selected.size > 0) {
+			const ignoreBtn = toolbar.createEl("button", {
+				text: `Ignore selected (${this.selected.size})`,
+			});
+			ignoreBtn.title =
+				"Stop showing these files as changes, without deleting anything " +
+				"already in RAGFlow. They come back if their content changes.";
+			ignoreBtn.onclick = () => void this.ignoreSelected();
+		}
+	}
+
+	/**
+	 * The one sync button: ticked files if any are ticked, everything otherwise.
+	 * On the Sync tab there is nothing to apply without a selection, since every
+	 * file there is offered for a forced re-upload.
+	 */
+	private async syncFromToolbar(): Promise<void> {
+		if (this.selected.size > 0) return this.syncSelected();
+		if (this.activeTab === "sync") {
+			new Notice("Tick the files you want to re-upload.");
+			return;
+		}
+		return this.syncAll();
 	}
 
 	/**
@@ -723,17 +740,18 @@ export class RagflowSyncView extends ItemView {
 	/** Reflect the current tick count on the selection-dependent buttons. */
 	private updateSelectionUi(): void {
 		const n = this.selected.size;
-		if (this.syncSelectedBtn) {
-			this.syncSelectedBtn.setText(
-				n > 0 ? `Sync selected (${n})` : "Sync selected"
+		if (this.syncBtn) {
+			// The label is the explanation: it always names exactly what will run.
+			const pending =
+				this.activeTab === "diff" ? syncAllChanges(this.changes).length : 0;
+			this.syncBtn.setText(
+				n > 0
+					? `Sync selected (${n})`
+					: pending > 0
+						? `Sync all (${pending})`
+						: "Sync"
 			);
-			this.syncSelectedBtn.toggleClass("mod-warning", n > 0);
-		}
-		if (this.ignoreSelectedBtn) {
-			this.ignoreSelectedBtn.setText(
-				n > 0 ? `Ignore selected (${n})` : "Ignore selected"
-			);
-			this.ignoreSelectedBtn.disabled = n === 0;
+			this.syncBtn.disabled = n === 0 && pending === 0;
 		}
 		if (this.deleteOrphansBtn) {
 			const picked = this.selectedOrphans.size;

@@ -113,6 +113,15 @@
 	color: var(--text-faint);
 }
 
+.ragflow-sync-view .ragflow-sync-warning {
+	margin-top: 8px;
+	padding: 6px 8px;
+	border-radius: 4px;
+	border-left: 3px solid var(--color-orange);
+	background-color: var(--background-secondary);
+	font-size: var(--font-ui-smaller);
+}
+
 .ragflow-sync-view .ragflow-sync-counts {
 	margin-top: 8px;
 	padding: 6px 8px;

@@ -2238,8 +2238,10 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
     this.changes = [];
     /** RAGFlow documents nothing in the vault accounts for; empty until a reconcile. */
     this.orphans = [];
-    /** Per-dataset tallies from the last reconcile. */
+    /** Per-dataset tallies from the last scan's RAGFlow check. */
     this.counts = [];
+    /** Why the RAGFlow half of the scan is missing or incomplete, if it is. */
+    this.remoteNote = null;
     this.statusEl = null;
     /** Whether a scan has completed, as distinct from having found changes. */
     this.scanned = false;
@@ -2253,8 +2255,7 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
     /** Folder paths currently expanded in the tree. */
     this.expanded = /* @__PURE__ */ new Set();
     /** Selection-dependent buttons, kept so their labels can update live. */
-    this.syncSelectedBtn = null;
-    this.ignoreSelectedBtn = null;
+    this.syncBtn = null;
     this.deleteOrphansBtn = null;
     this.plugin = plugin;
   }
@@ -2276,32 +2277,37 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
     if (this.statusEl)
       this.statusEl.setText(text);
   }
+  /**
+   * One scan answers everything: what changed locally, and what the RAGFlow
+   * datasets actually hold.
+   *
+   * The remote half used to be a second button the user had to know to press,
+   * which made a mismatched document count look like the plugin was failing to
+   * notice it. Reading every mapped dataset costs one request per hundred
+   * documents — seconds, not minutes — so there is no reason to make it opt-in.
+   * When RAGFlow cannot be reached the local half still stands on its own and
+   * is shown with a warning, rather than failing the whole scan.
+   */
   async scan() {
     if (this.busy)
       return;
-    if (!this.plugin.settings.apiKey) {
-      new import_obsidian6.Notice("Set your RAGFlow API key in settings first.");
-      return;
-    }
     this.busy = true;
-    this.setStatus("Scanning for differences...");
+    this.setStatus("Scanning your vault...");
     try {
       const result = await this.plugin.engine.computeDiff();
       this.changes = result.changes;
       this.scanned = true;
       this.selected.clear();
-      this.clearReconcile();
-      this.expanded = foldersWithChanges(this.changes);
+      this.clearRemote();
       if (result.missingMappings.length > 0) {
         new import_obsidian6.Notice(
           `Some mapped folders were not found: ${result.missingMappings.map((m) => m.vaultPath).join(", ")}`
         );
       }
+      await this.checkRemote();
+      this.expanded = foldersWithChanges(this.changes);
       this.render();
-      const counts = summarize(this.changes);
-      this.setStatus(
-        `Scan complete: ${counts.new} new, ${counts.modified} modified, ${counts.deleted} deleted, ${counts.unchanged} up to date.`
-      );
+      this.setStatus(this.scanSummary());
     } catch (e) {
       new import_obsidian6.Notice(`Scan failed: ${e.message}`);
       this.setStatus(`Scan failed: ${e.message}`);
@@ -2309,32 +2315,16 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
       this.busy = false;
     }
   }
-  clearReconcile() {
-    this.orphans = [];
-    this.counts = [];
-    this.selectedOrphans.clear();
-  }
   /**
-   * Remote reconcile: ask RAGFlow what it actually holds and fold the answer
-   * into the current scan. A plain scan compares the vault with the local
-   * synced state only, so drift on the RAGFlow side — documents uploaded
-   * outside the plugin, leftovers from a lost synced state, "name(n).ext"
-   * duplicates, documents deleted in the RAGFlow UI — is invisible to it and
-   * only shows up here.
+   * The RAGFlow half of a scan. Never throws: a connection problem downgrades
+   * the scan to its local half with an explanation, because "here is what
+   * changed on disk" is still worth showing when the server is unreachable.
    */
-  async reconcile() {
-    if (this.busy)
-      return;
+  async checkRemote() {
     if (!this.plugin.settings.apiKey) {
-      new import_obsidian6.Notice("Set your RAGFlow API key in settings first.");
+      this.remoteNote = "No API key set, so RAGFlow was not checked \u2014 the list below reflects the plugin's local record only.";
       return;
     }
-    if (!this.scanned)
-      await this.scan();
-    if (!this.scanned)
-      return;
-    this.busy = true;
-    this.setStatus("Reconciling with RAGFlow...");
     try {
       const result = await this.plugin.engine.reconcile(
         this.changes,
@@ -2342,25 +2332,37 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
       );
       this.changes = result.changes;
       this.orphans = result.orphans;
-      this.selectedOrphans.clear();
       this.counts = result.counts;
       await this.plugin.saveSettings();
-      this.expanded = foldersWithChanges(this.changes);
-      this.render();
-      const missing = summarize(this.changes).missing;
-      const parts = [`${this.orphans.length} orphaned document(s) in RAGFlow`];
-      if (missing > 0)
-        parts.push(`${missing} file(s) missing from RAGFlow`);
       if (result.absentDatasets.length > 0) {
-        parts.push(`dataset(s) not found: ${result.absentDatasets.join(", ")}`);
+        this.remoteNote = `Not found in RAGFlow yet: ${result.absentDatasets.join(
+          ", "
+        )}. They are created on the first sync.`;
       }
-      this.setStatus(`Reconcile complete: ${parts.join(", ")}.`);
     } catch (e) {
-      new import_obsidian6.Notice(`Reconcile failed: ${e.message}`);
-      this.setStatus(`Reconcile failed: ${e.message}`);
-    } finally {
-      this.busy = false;
+      this.remoteNote = `Could not read RAGFlow (${e.message}) \u2014 the list below reflects the plugin's local record only, so documents added or deleted on the RAGFlow side are not accounted for.`;
     }
+  }
+  scanSummary() {
+    const counts = summarize(this.changes);
+    const parts = [
+      `${counts.new} new`,
+      `${counts.modified} modified`,
+      `${counts.deleted} deleted`
+    ];
+    if (counts.missing > 0)
+      parts.push(`${counts.missing} missing from RAGFlow`);
+    if (this.orphans.length > 0) {
+      parts.push(`${this.orphans.length} only in RAGFlow`);
+    }
+    parts.push(`${counts.unchanged} up to date`);
+    return `Scan complete: ${parts.join(", ")}.`;
+  }
+  clearRemote() {
+    this.orphans = [];
+    this.counts = [];
+    this.remoteNote = null;
+    this.selectedOrphans.clear();
   }
   /**
    * Mirror: make every mapped dataset match its source folder exactly —
@@ -2574,14 +2576,19 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
     const container = this.containerEl.children[1];
     container.empty();
     container.addClass("ragflow-sync-view");
-    this.syncSelectedBtn = null;
-    this.ignoreSelectedBtn = null;
+    this.syncBtn = null;
     this.deleteOrphansBtn = null;
     this.renderTabs(container.createDiv({ cls: "ragflow-sync-tabs" }));
     const toolbar = container.createDiv({ cls: "ragflow-sync-toolbar" });
     this.renderToolbar(toolbar);
     this.statusEl = container.createDiv({ cls: "ragflow-sync-status" });
     if (this.activeTab === "diff") {
+      if (this.remoteNote) {
+        container.createDiv({
+          cls: "ragflow-sync-warning",
+          text: this.remoteNote
+        });
+      }
       this.renderCounts(container);
       this.renderOrphans(container);
     }
@@ -2589,12 +2596,12 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
     if (this.changes.length === 0) {
       container.createDiv({
         cls: "ragflow-sync-empty",
-        text: 'No scan results yet. Click "Scan diff" to compare your vault with RAGFlow.'
+        text: 'No results yet. Click "Scan" to compare your vault with RAGFlow.'
       });
     } else if (data.length === 0) {
       container.createDiv({
         cls: "ragflow-sync-empty",
-        text: this.activeTab === "diff" ? "Everything is up to date." : "No in-scope files to show."
+        text: this.activeTab === "diff" ? "Everything is up to date." : "No files in scope. Check your dataset mappings in settings."
       });
     } else {
       const tree = container.createDiv({ cls: "ragflow-sync-tree" });
@@ -2617,37 +2624,46 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
           void this.scan();
       };
     };
-    tab("diff", "Scan diff");
-    tab("sync", "Sync");
+    tab("diff", "Changes");
+    tab("sync", "All files");
   }
+  /**
+   * Three controls, not six. One scan covers both halves of the comparison, one
+   * sync button follows the selection instead of pairing "all" with "selected",
+   * and "Ignore" only appears once there is a selection to ignore. Mirror is a
+   * rare recovery action that deletes in bulk, so it lives in the command
+   * palette rather than one click away from the everyday buttons.
+   */
   renderToolbar(toolbar) {
     if (this.activeTab === "diff") {
-      const scanBtn = toolbar.createEl("button", { text: "Scan diff" });
+      const scanBtn = toolbar.createEl("button", { text: "Scan" });
+      scanBtn.title = "Compare your vault against RAGFlow: what changed locally, and what the datasets actually hold.";
       scanBtn.onclick = () => void this.scan();
-      const reconcileBtn = toolbar.createEl("button", { text: "Reconcile" });
-      reconcileBtn.title = "Compare against the documents actually in RAGFlow. A scan only compares your vault with the plugin's local record, so documents added or deleted on the RAGFlow side never show up in it.";
-      reconcileBtn.onclick = () => void this.reconcile();
-      const mirrorBtn = toolbar.createEl("button", { text: "Mirror" });
-      mirrorBtn.title = "Make RAGFlow match your vault folders exactly: delete documents the folders do not account for, upload what is missing, leave the rest alone. Judged by filename rather than the plugin's local record, so it works even when that record is wrong. Confirms first.";
-      mirrorBtn.onclick = () => void this.mirror();
-      this.syncSelectedBtn = toolbar.createEl("button", {
-        text: "Sync selected"
-      });
-      this.syncSelectedBtn.addClass("mod-cta");
-      this.syncSelectedBtn.onclick = () => void this.syncSelected();
-      const syncAllBtn = toolbar.createEl("button", { text: "Sync all" });
-      syncAllBtn.onclick = () => void this.syncAll();
-      this.ignoreSelectedBtn = toolbar.createEl("button", {
-        text: "Ignore selected"
-      });
-      this.ignoreSelectedBtn.onclick = () => void this.ignoreSelected();
-    } else {
-      this.syncSelectedBtn = toolbar.createEl("button", {
-        text: "Sync selected"
-      });
-      this.syncSelectedBtn.addClass("mod-cta");
-      this.syncSelectedBtn.onclick = () => void this.syncSelected();
     }
+    this.syncBtn = toolbar.createEl("button", { text: "Sync" });
+    this.syncBtn.addClass("mod-cta");
+    this.syncBtn.onclick = () => void this.syncFromToolbar();
+    if (this.activeTab === "diff" && this.selected.size > 0) {
+      const ignoreBtn = toolbar.createEl("button", {
+        text: `Ignore selected (${this.selected.size})`
+      });
+      ignoreBtn.title = "Stop showing these files as changes, without deleting anything already in RAGFlow. They come back if their content changes.";
+      ignoreBtn.onclick = () => void this.ignoreSelected();
+    }
+  }
+  /**
+   * The one sync button: ticked files if any are ticked, everything otherwise.
+   * On the Sync tab there is nothing to apply without a selection, since every
+   * file there is offered for a forced re-upload.
+   */
+  async syncFromToolbar() {
+    if (this.selected.size > 0)
+      return this.syncSelected();
+    if (this.activeTab === "sync") {
+      new import_obsidian6.Notice("Tick the files you want to re-upload.");
+      return;
+    }
+    return this.syncAll();
   }
   /**
    * The per-dataset tallies from the last reconcile, one line per dataset plus
@@ -2799,17 +2815,12 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
   /** Reflect the current tick count on the selection-dependent buttons. */
   updateSelectionUi() {
     const n = this.selected.size;
-    if (this.syncSelectedBtn) {
-      this.syncSelectedBtn.setText(
-        n > 0 ? `Sync selected (${n})` : "Sync selected"
+    if (this.syncBtn) {
+      const pending = this.activeTab === "diff" ? syncAllChanges(this.changes).length : 0;
+      this.syncBtn.setText(
+        n > 0 ? `Sync selected (${n})` : pending > 0 ? `Sync all (${pending})` : "Sync"
       );
-      this.syncSelectedBtn.toggleClass("mod-warning", n > 0);
-    }
-    if (this.ignoreSelectedBtn) {
-      this.ignoreSelectedBtn.setText(
-        n > 0 ? `Ignore selected (${n})` : "Ignore selected"
-      );
-      this.ignoreSelectedBtn.disabled = n === 0;
+      this.syncBtn.disabled = n === 0 && pending === 0;
     }
     if (this.deleteOrphansBtn) {
       const picked = this.selectedOrphans.size;
@@ -2850,7 +2861,7 @@ var RagflowSyncPlugin = class extends import_obsidian7.Plugin {
     });
     this.addCommand({
       id: "ragflow-scan-diff",
-      name: "Scan for differences",
+      name: "Scan (vault and RAGFlow)",
       callback: async () => {
         const view = await this.activateView();
         await view?.scan();
@@ -2865,17 +2876,6 @@ var RagflowSyncPlugin = class extends import_obsidian7.Plugin {
           return;
         await view.scan();
         await view.syncAll();
-      }
-    });
-    this.addCommand({
-      id: "ragflow-reconcile",
-      name: "Reconcile with RAGFlow (find orphaned/missing documents)",
-      callback: async () => {
-        const view = await this.activateView();
-        if (!view)
-          return;
-        await view.scan();
-        await view.reconcile();
       }
     });
     this.addCommand({
