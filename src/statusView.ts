@@ -1,8 +1,9 @@
 import { ItemView, Notice, WorkspaceLeaf } from "obsidian";
 import type RagflowSyncPlugin from "./main";
-import { ChangeKind, FileChange, RemoteOrphan } from "./types";
+import { ChangeKind, DatasetCount, FileChange, RemoteOrphan } from "./types";
 import { summarize } from "./syncEngine";
 import {
+	countNotes,
 	forceAllChanges,
 	forceSelectedChanges,
 	syncAllChanges,
@@ -36,8 +37,8 @@ export class RagflowSyncView extends ItemView {
 	private changes: FileChange[] = [];
 	/** RAGFlow documents nothing in the vault accounts for; empty until a reconcile. */
 	private orphans: RemoteOrphan[] = [];
-	/** Per-dataset "remote N / tracked M" lines from the last reconcile. */
-	private countLines: string[] = [];
+	/** Per-dataset tallies from the last reconcile. */
+	private counts: DatasetCount[] = [];
 	private statusEl: HTMLElement | null = null;
 	/** Whether a scan has completed, as distinct from having found changes. */
 	private scanned = false;
@@ -125,7 +126,7 @@ export class RagflowSyncView extends ItemView {
 
 	private clearReconcile(): void {
 		this.orphans = [];
-		this.countLines = [];
+		this.counts = [];
 		this.selectedOrphans.clear();
 	}
 
@@ -157,9 +158,7 @@ export class RagflowSyncView extends ItemView {
 			this.changes = result.changes;
 			this.orphans = result.orphans;
 			this.selectedOrphans.clear();
-			this.countLines = result.counts.map(
-				(c) => `${c.datasetName}: ${c.remote} in RAGFlow / ${c.tracked} tracked`
-			);
+			this.counts = result.counts;
 			await this.plugin.saveSettings();
 			this.expanded = foldersWithChanges(this.changes);
 			this.render();
@@ -210,7 +209,7 @@ export class RagflowSyncView extends ItemView {
 			const gone = new Set(result.deletedIds);
 			this.orphans = this.orphans.filter((o) => !gone.has(o.documentId));
 			// The per-dataset tallies counted the documents we just removed.
-			this.countLines = [];
+			this.counts = [];
 			this.selectedOrphans.clear();
 			this.render();
 			this.setStatus(msg);
@@ -405,12 +404,25 @@ export class RagflowSyncView extends ItemView {
 		}
 	}
 
-	/** The per-dataset "remote N / tracked M" tallies from the last reconcile. */
+	/**
+	 * The per-dataset tallies from the last reconcile, one line per dataset plus
+	 * a note wherever a number needs explaining. The three counts answer
+	 * different questions: RAGFlow below tracked means documents were lost
+	 * remotely, tracked below vault means files were never uploaded.
+	 */
 	private renderCounts(container: HTMLElement): void {
-		if (this.countLines.length === 0) return;
+		if (this.counts.length === 0) return;
 		const box = container.createDiv({ cls: "ragflow-sync-counts" });
-		for (const line of this.countLines) {
-			box.createDiv({ cls: "ragflow-sync-count-line", text: line });
+		for (const c of this.counts) {
+			box.createDiv({
+				cls: "ragflow-sync-count-line",
+				text:
+					`${c.datasetName}: ${c.remote} in RAGFlow / ` +
+					`${c.tracked} tracked / ${c.inScope} in vault`,
+			});
+			for (const note of countNotes(c)) {
+				box.createDiv({ cls: "ragflow-sync-count-note", text: note });
+			}
 		}
 	}
 

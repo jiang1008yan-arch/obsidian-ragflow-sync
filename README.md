@@ -378,8 +378,21 @@ the scan cheerfully reports everything up to date. That happens when:
 Click `Reconcile` to close that gap. It lists every document actually in each
 mapped dataset and cross-references it with your vault, then reports:
 
-- a `datasetname: 128 in RAGFlow / 120 tracked` line per dataset, so a mismatch
-  is visible at a glance;
+- a `datasetname: 128 in RAGFlow / 120 tracked / 135 in vault` line per dataset,
+  plus a plain-language note under it for every gap. The three numbers answer
+  different questions and routinely disagree:
+  - **in RAGFlow** — documents actually in the dataset right now.
+  - **tracked** — documents the plugin's local record says it uploaded. Fewer
+    documents in RAGFlow than tracked means RAGFlow lost them.
+  - **in vault** — in-scope files routed to this dataset. More files in the
+    vault than tracked means they were never uploaded (they show as `New`).
+
+  Note that "in vault" counts only files the plugin manages. If a mapped folder
+  holds far more files than that, the note tells you how many the extension and
+  exclude settings skip — those are never synced and never counted anywhere
+  else. A separate note appears when two files in different subfolders share a
+  filename: datasets are flat and uploads replace by name, so such a pair
+  overwrites itself and caps how many documents the dataset can ever hold.
 - an **In RAGFlow only (N)** section listing documents nothing in your vault
   accounts for. Tick the ones you want gone and click `Delete N from RAGFlow`.
   This is a separate button from `Sync all` on purpose: a dataset may

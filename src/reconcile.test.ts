@@ -1,10 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { markMissing, reconcileDataset, trackedCount } from "./reconcile";
+import {
+	datasetFileTally,
+	markMissing,
+	reconcileDataset,
+	skippedCount,
+	trackedCount,
+} from "./reconcile";
 import {
 	ChangeKind,
 	DatasetMapping,
 	FileChange,
 	RagflowDocument,
+	ScopeConfig,
 	SyncedFileRecord,
 } from "./types";
 
@@ -163,6 +170,82 @@ describe("markMissing", () => {
 		expect(r.changes[0].kind).toBe("missing");
 		expect(r.changes[0].ignored).toBe(false);
 		expect(r.unsnoozed).toEqual(["Notes/a.md"]);
+	});
+});
+
+describe("datasetFileTally", () => {
+	it("counts the in-scope files routed to the dataset", () => {
+		const r = datasetFileTally(
+			[
+				change("Notes/a.md", "unchanged"),
+				change("Notes/b.md", "new"),
+				change("Other/c.md", "unchanged", { mapping: mapping("other_kb") }),
+			],
+			"raw_policy"
+		);
+		expect(r.inScope).toBe(2);
+		expect(r.distinctNames).toBe(2);
+	});
+
+	it("excludes files on their way out", () => {
+		const r = datasetFileTally(
+			[
+				change("Notes/a.md", "unchanged"),
+				change("Notes/gone.md", "deleted", { record: record() }),
+			],
+			"raw_policy"
+		);
+		expect(r.inScope).toBe(1);
+	});
+
+	it("reports fewer distinct names when files in different folders collide", () => {
+		// The flat-dataset ceiling: these two can never both exist in RAGFlow.
+		const r = datasetFileTally(
+			[
+				change("Notes/US/index.md", "unchanged"),
+				change("Notes/EU/index.md", "unchanged"),
+				change("Notes/other.md", "unchanged"),
+			],
+			"raw_policy"
+		);
+		expect(r.inScope).toBe(3);
+		expect(r.distinctNames).toBe(2);
+	});
+});
+
+describe("skippedCount", () => {
+	const scope: ScopeConfig = {
+		mappings: [mapping()],
+		extensions: ["md"],
+		excludeGlobs: [".trash"],
+	};
+	const entry = (path: string) => ({ path, size: 1, mtime: 1 });
+
+	it("counts files under the mapping that scope rules drop", () => {
+		const n = skippedCount(
+			[
+				entry("Notes/a.md"),
+				entry("Notes/diagram.canvas"),
+				entry("Notes/scan.pdf"),
+				entry("Notes/.trash/old.md"),
+			],
+			scope,
+			"raw_policy"
+		);
+		// canvas and pdf are not allowed extensions, .trash is excluded.
+		expect(n).toBe(3);
+	});
+
+	it("ignores files outside the dataset's mapped folders", () => {
+		expect(skippedCount([entry("Elsewhere/x.canvas")], scope, "raw_policy")).toBe(
+			0
+		);
+	});
+
+	it("is zero when everything under the mapping is in scope", () => {
+		expect(
+			skippedCount([entry("Notes/a.md"), entry("Notes/b.md")], scope, "raw_policy")
+		).toBe(0);
 	});
 });
 

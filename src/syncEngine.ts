@@ -8,7 +8,13 @@ import {
 	finalizeWithHashes,
 	markIgnored,
 } from "./diff";
-import { markMissing, reconcileDataset, trackedCount } from "./reconcile";
+import {
+	datasetFileTally,
+	markMissing,
+	reconcileDataset,
+	skippedCount,
+	trackedCount,
+} from "./reconcile";
 import {
 	applySyncRun,
 	PROCESSING_VERSION,
@@ -212,6 +218,10 @@ export class SyncEngine {
 		const trackedIds = new Set(
 			Object.values(this.store.allFiles()).map((r) => r.documentId)
 		);
+		// The vault side of the tally needs the unfiltered snapshot, to count what
+		// scope rules skip as well as what they let through.
+		const snapshot = this.buildSnapshot();
+		const scope = this.scope();
 		const orphans: RemoteOrphan[] = [];
 		const counts: DatasetCount[] = [];
 		const absentDatasets: string[] = [];
@@ -234,10 +244,14 @@ export class SyncEngine {
 			);
 			orphans.push(...result.orphans);
 			missingPaths.push(...result.missingPaths);
+			const tally = datasetFileTally(changes, name);
 			counts.push({
 				datasetName: name,
 				remote: remoteDocs.length,
 				tracked: trackedCount(this.store.allFiles(), datasetId),
+				inScope: tally.inScope,
+				distinctNames: tally.distinctNames,
+				skipped: skippedCount(snapshot, scope, name),
 			});
 		}
 

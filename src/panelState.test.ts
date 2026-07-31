@@ -1,12 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
+	countNotes,
 	forceAllChanges,
 	forceSelectedChanges,
 	syncSelectedChanges,
 	syncAllChanges,
 	tabData,
 } from "./panelState";
-import type { ChangeKind, FileChange } from "./types";
+import type { ChangeKind, DatasetCount, FileChange } from "./types";
 
 function change(
 	vaultPath: string,
@@ -69,5 +70,57 @@ describe("panel state", () => {
 			{ vaultPath: "same.md", kind: "modified", hash: undefined },
 			change("gone.md", "deleted"),
 		]);
+	});
+});
+
+describe("countNotes", () => {
+	const count = (over: Partial<DatasetCount> = {}): DatasetCount => ({
+		datasetName: "raw_policy",
+		remote: 10,
+		tracked: 10,
+		inScope: 10,
+		distinctNames: 10,
+		skipped: 0,
+		...over,
+	});
+
+	it("says nothing when every number agrees", () => {
+		expect(countNotes(count())).toEqual([]);
+	});
+
+	it("explains documents lost on the RAGFlow side", () => {
+		const notes = countNotes(count({ remote: 8 }));
+		expect(notes).toHaveLength(1);
+		expect(notes[0]).toContain("2 document(s) tracked but not in RAGFlow");
+	});
+
+	it("explains files that were never uploaded", () => {
+		// distinctNames tracks inScope: these 4 extra files have distinct names, so
+		// only the never-uploaded note applies.
+		const notes = countNotes(count({ inScope: 14, distinctNames: 14 }));
+		expect(notes).toHaveLength(1);
+		expect(notes[0]).toContain("4 file(s) never uploaded");
+	});
+
+	it("explains the flat-dataset ceiling when names collide", () => {
+		const notes = countNotes(count({ distinctNames: 7 }));
+		expect(notes).toHaveLength(1);
+		expect(notes[0]).toContain("3 file(s) share a document name");
+		expect(notes[0]).toContain("never hold more than 7");
+	});
+
+	it("explains files the scope settings skip", () => {
+		const notes = countNotes(count({ skipped: 330 }));
+		expect(notes).toHaveLength(1);
+		expect(notes[0]).toContain("330 file(s)");
+	});
+
+	it("reports every applicable gap at once", () => {
+		// The real shape of a drifted dataset: short remotely, behind on uploads,
+		// name collisions capping it, and a pile of out-of-scope files besides.
+		const notes = countNotes(
+			count({ remote: 559, tracked: 561, inScope: 570, distinctNames: 566, skipped: 12 })
+		);
+		expect(notes).toHaveLength(4);
 	});
 });

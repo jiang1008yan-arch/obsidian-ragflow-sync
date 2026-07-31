@@ -174,11 +174,32 @@ export interface ReconcileResult {
 	absentDatasets: string[];
 }
 
-/** What RAGFlow holds for a dataset versus what the synced state tracks in it. */
+/**
+ * A dataset's full tally, across all three places a file can be counted:
+ * RAGFlow itself, the synced state, and the vault. They answer different
+ * questions and routinely disagree — `remote` below `tracked` means RAGFlow
+ * lost documents, `tracked` below `inScope` means files were never uploaded,
+ * and `distinctNames` below `inScope` means same-named files are overwriting
+ * each other. `skipped` explains a folder that dwarfs its dataset.
+ */
 export interface DatasetCount {
 	datasetName: string;
+	/** Documents actually in the RAGFlow dataset. */
 	remote: number;
+	/** Synced-state records pointing at it. */
 	tracked: number;
+	/** In-scope vault files routed to it. */
+	inScope: number;
+	/** Distinct document names among those files — the ceiling on `remote`. */
+	distinctNames: number;
+	/** Files under its mapped folders that extension/exclude rules skip. */
+	skipped: number;
+}
+
+/** The vault-side half of a DatasetCount. */
+export interface DatasetFileTally {
+	inScope: number;
+	distinctNames: number;
 }
 
 /** An unfiltered point-in-time entry from the vault snapshot. */

@@ -933,6 +933,31 @@ function markMissing(changes, missingPaths) {
 function trackedCount(files, datasetId) {
   return Object.values(files).filter((r) => r.datasetId === datasetId).length;
 }
+function datasetFileTally(changes, datasetName) {
+  let inScope = 0;
+  for (const change of changes) {
+    if (change.kind === "deleted")
+      continue;
+    if (change.mapping?.datasetName !== datasetName)
+      continue;
+    inScope += 1;
+  }
+  return {
+    inScope,
+    distinctNames: expectedNames(changes, datasetName).size
+  };
+}
+function skippedCount(snapshot, scope, datasetName) {
+  let skipped = 0;
+  for (const entry of snapshot) {
+    if (isInScope(entry.path, scope))
+      continue;
+    if (owningMapping(entry.path, scope)?.datasetName !== datasetName)
+      continue;
+    skipped += 1;
+  }
+  return skipped;
+}
 
 // src/syncApplyRun.ts
 var import_obsidian4 = require("obsidian");
@@ -1714,6 +1739,8 @@ var SyncEngine = class {
     const trackedIds = new Set(
       Object.values(this.store.allFiles()).map((r) => r.documentId)
     );
+    const snapshot = this.buildSnapshot();
+    const scope = this.scope();
     const orphans = [];
     const counts = [];
     const absentDatasets = [];
@@ -1735,10 +1762,14 @@ var SyncEngine = class {
       );
       orphans.push(...result.orphans);
       missingPaths.push(...result.missingPaths);
+      const tally = datasetFileTally(changes, name);
       counts.push({
         datasetName: name,
         remote: remoteDocs.length,
-        tracked: trackedCount(this.store.allFiles(), datasetId)
+        tracked: trackedCount(this.store.allFiles(), datasetId),
+        inScope: tally.inScope,
+        distinctNames: tally.distinctNames,
+        skipped: skippedCount(snapshot, scope, name)
       });
     }
     const settings = this.getSettings();
@@ -1925,6 +1956,30 @@ function forceSelectedChanges(changes, selected) {
 function forceAllChanges(changes) {
   return changes.filter((c) => !c.ignored).map(forceUploadChange);
 }
+function countNotes(c) {
+  const notes = [];
+  if (c.remote < c.tracked) {
+    notes.push(
+      `${c.tracked - c.remote} document(s) tracked but not in RAGFlow \u2014 badged "Missing in RAGFlow"; sync to re-upload.`
+    );
+  }
+  if (c.inScope > c.tracked) {
+    notes.push(
+      `${c.inScope - c.tracked} file(s) never uploaded \u2014 badged "New"; sync to upload.`
+    );
+  }
+  if (c.inScope > c.distinctNames) {
+    notes.push(
+      `${c.inScope - c.distinctNames} file(s) share a document name with another file here. Datasets are flat and uploads replace by name, so this dataset can never hold more than ${c.distinctNames} documents \u2014 rename them or split the mapping.`
+    );
+  }
+  if (c.skipped > 0) {
+    notes.push(
+      `${c.skipped} file(s) in the mapped folder(s) are skipped by the extension/exclude settings and are never synced.`
+    );
+  }
+  return notes;
+}
 function forceUploadChange(change) {
   return change.kind === "unchanged" || change.ignored ? {
     ...change,
@@ -1950,8 +2005,8 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
     this.changes = [];
     /** RAGFlow documents nothing in the vault accounts for; empty until a reconcile. */
     this.orphans = [];
-    /** Per-dataset "remote N / tracked M" lines from the last reconcile. */
-    this.countLines = [];
+    /** Per-dataset tallies from the last reconcile. */
+    this.counts = [];
     this.statusEl = null;
     /** Whether a scan has completed, as distinct from having found changes. */
     this.scanned = false;
@@ -2023,7 +2078,7 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
   }
   clearReconcile() {
     this.orphans = [];
-    this.countLines = [];
+    this.counts = [];
     this.selectedOrphans.clear();
   }
   /**
@@ -2055,9 +2110,7 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
       this.changes = result.changes;
       this.orphans = result.orphans;
       this.selectedOrphans.clear();
-      this.countLines = result.counts.map(
-        (c) => `${c.datasetName}: ${c.remote} in RAGFlow / ${c.tracked} tracked`
-      );
+      this.counts = result.counts;
       await this.plugin.saveSettings();
       this.expanded = foldersWithChanges(this.changes);
       this.render();
@@ -2107,7 +2160,7 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
       }
       const gone = new Set(result.deletedIds);
       this.orphans = this.orphans.filter((o) => !gone.has(o.documentId));
-      this.countLines = [];
+      this.counts = [];
       this.selectedOrphans.clear();
       this.render();
       this.setStatus(msg);
@@ -2274,13 +2327,24 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
       this.syncSelectedBtn.onclick = () => void this.syncSelected();
     }
   }
-  /** The per-dataset "remote N / tracked M" tallies from the last reconcile. */
+  /**
+   * The per-dataset tallies from the last reconcile, one line per dataset plus
+   * a note wherever a number needs explaining. The three counts answer
+   * different questions: RAGFlow below tracked means documents were lost
+   * remotely, tracked below vault means files were never uploaded.
+   */
   renderCounts(container) {
-    if (this.countLines.length === 0)
+    if (this.counts.length === 0)
       return;
     const box = container.createDiv({ cls: "ragflow-sync-counts" });
-    for (const line of this.countLines) {
-      box.createDiv({ cls: "ragflow-sync-count-line", text: line });
+    for (const c of this.counts) {
+      box.createDiv({
+        cls: "ragflow-sync-count-line",
+        text: `${c.datasetName}: ${c.remote} in RAGFlow / ${c.tracked} tracked / ${c.inScope} in vault`
+      });
+      for (const note of countNotes(c)) {
+        box.createDiv({ cls: "ragflow-sync-count-note", text: note });
+      }
     }
   }
   /**

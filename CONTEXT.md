@@ -34,6 +34,10 @@ _Avoid_: status, state, action.
 The comparison of what RAGFlow actually holds in each mapped dataset against the change list and the **Synced state**. Separate from the Diff and never run as part of a scan, because it costs a fully paginated document listing per dataset. It is the only read of RAGFlow's contents, and the only thing that can see remote-side drift.
 _Avoid_: remote diff, verify, audit.
 
+**Dataset tally**:
+A dataset's counts across all three places a file can be counted — RAGFlow (`remote`), the **Synced state** (`tracked`), and the vault (`inScope`) — plus `distinctNames` and `skipped`. The three disagree for different reasons, so each gap carries its own note: remote below tracked is remote loss, tracked below in-scope is never-uploaded, in-scope above distinctNames is the flat-dataset name ceiling, and skipped is what scope rules drop.
+_Avoid_: counts, stats, numbers.
+
 **Orphan**:
 A RAGFlow document in a mapped dataset that no **Synced state** record points at and whose name matches no in-scope file routed to that dataset. Has no vault path, so it lives outside the change list and outside the folder tree. Deleted only by its own explicit action, never by "Sync all".
 _Avoid_: stray, leftover, untracked document.
@@ -105,6 +109,8 @@ _Avoid_: view state, UI helper.
 > **Maintainer:** "Yes — **Ignore (snooze)** hides it from the New/Modified/Deleted list and leaves it out of 'Sync all', so the RAGFlow document is kept. It's still tracked, and only re-surfaces if a file reappears at that path. The file remains pickable (badge-free) in the Sync tab."
 > **Dev:** "The dataset has more documents than the vault has files, but Scan diff shows nothing. Bug?"
 > **Maintainer:** "No — by construction. The **Diff** only ever compares the **Vault snapshot** with the **Synced state**; a document we never recorded doesn't exist as far as it's concerned. Run a **Remote reconcile** and it comes back as an **Orphan**."
+> **Dev:** "Reconcile says 559 in RAGFlow / 561 tracked, but my folder holds way more than 561 files."
+> **Maintainer:** "Three different counts, three different questions — read the **Dataset tally**'s notes. 561 vs 559 is remote loss. Your folder vs 561 is either files never uploaded, files the scope rules skip, or same-named files overwriting each other; the notes say which."
 
 ## Flagged ambiguities
 
