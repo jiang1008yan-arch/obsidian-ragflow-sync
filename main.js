@@ -2196,22 +2196,24 @@ function forceUploadChange(change) {
 
 // src/statusView.ts
 var VIEW_TYPE_RAGFLOW_SYNC = "ragflow-sync-view";
-var MirrorConfirmModal = class extends import_obsidian6.Modal {
-  constructor(app, lines, onConfirm) {
+var ConfirmModal = class extends import_obsidian6.Modal {
+  constructor(app, title, lines, confirmLabel, onConfirm) {
     super(app);
     this.confirmed = false;
+    this.title = title;
     this.lines = lines;
+    this.confirmLabel = confirmLabel;
     this.onConfirm = onConfirm;
   }
   onOpen() {
-    this.titleEl.setText("Mirror vault to RAGFlow");
+    this.titleEl.setText(this.title);
     for (const line of this.lines) {
       this.contentEl.createEl("p", { text: line });
     }
     const buttons = this.contentEl.createDiv({ cls: "ragflow-modal-buttons" });
     const cancel = buttons.createEl("button", { text: "Cancel" });
     cancel.onclick = () => this.close();
-    const confirm = buttons.createEl("button", { text: "Mirror" });
+    const confirm = buttons.createEl("button", { text: this.confirmLabel });
     confirm.addClass("mod-warning");
     confirm.onclick = () => {
       this.confirmed = true;
@@ -2414,7 +2416,37 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
       `Leave ${totals.kept} document(s) untouched.`,
       "Deletions cannot be undone. Snoozed (ignored) files are included: a mirror makes RAGFlow match your vault exactly."
     ];
-    new MirrorConfirmModal(this.app, lines, () => void this.runMirror(plan)).open();
+    new ConfirmModal(
+      this.app,
+      "Mirror vault to RAGFlow",
+      lines,
+      "Mirror",
+      () => void this.runMirror(plan)
+    ).open();
+  }
+  /**
+   * Force re-upload, behind a confirmation: it re-sends every in-scope file
+   * regardless of the diff, and each upload is re-parsed by RAGFlow, so on a
+   * large vault it is a much bigger job than the button it sits next to.
+   */
+  confirmForceSyncAll() {
+    if (this.busy)
+      return;
+    const total = this.changes.filter((c) => !c.ignored).length;
+    if (total === 0) {
+      new import_obsidian6.Notice("Nothing to re-upload. Run a scan first.");
+      return;
+    }
+    new ConfirmModal(
+      this.app,
+      "Force re-upload every file",
+      [
+        `Re-upload all ${total} in-scope file(s), including the ones already up to date.`,
+        "RAGFlow re-parses everything that is uploaded, so this can take a long time on a large vault. Snoozed (ignored) files are skipped."
+      ],
+      "Re-upload all",
+      () => void this.forceSyncAll()
+    ).open();
   }
   /** Execute a confirmed Mirror plan: uploads and record-clearing deletes first, then orphans. */
   async runMirror(plan) {
@@ -2630,9 +2662,13 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
   /**
    * Three controls, not six. One scan covers both halves of the comparison, one
    * sync button follows the selection instead of pairing "all" with "selected",
-   * and "Ignore" only appears once there is a selection to ignore. Mirror is a
-   * rare recovery action that deletes in bulk, so it lives in the command
-   * palette rather than one click away from the everyday buttons.
+   * and "Ignore" only appears once there is a selection to ignore.
+   *
+   * The rarer whole-dataset actions hang off the sync button in a menu rather
+   * than taking toolbar slots of their own. They belong next to Sync because
+   * that is what they are variations on, but both rewrite far more than the
+   * everyday button does — Mirror deletes in bulk — so a click on the caret
+   * stands between them and a mis-aimed click on Sync.
    */
   renderToolbar(toolbar) {
     if (this.activeTab === "diff") {
@@ -2640,9 +2676,14 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
       scanBtn.title = "Compare your vault against RAGFlow: what changed locally, and what the datasets actually hold.";
       scanBtn.onclick = () => void this.scan();
     }
-    this.syncBtn = toolbar.createEl("button", { text: "Sync" });
+    const group = toolbar.createDiv({ cls: "ragflow-sync-split" });
+    this.syncBtn = group.createEl("button", { text: "Sync" });
     this.syncBtn.addClass("mod-cta");
     this.syncBtn.onclick = () => void this.syncFromToolbar();
+    const moreBtn = group.createEl("button", { text: "\u25BE" });
+    moreBtn.addClass("ragflow-sync-more");
+    moreBtn.title = "Other sync actions";
+    moreBtn.onclick = (event) => this.showSyncMenu(event);
     if (this.activeTab === "diff" && this.selected.size > 0) {
       const ignoreBtn = toolbar.createEl("button", {
         text: `Ignore selected (${this.selected.size})`
@@ -2650,6 +2691,17 @@ var RagflowSyncView = class extends import_obsidian6.ItemView {
       ignoreBtn.title = "Stop showing these files as changes, without deleting anything already in RAGFlow. They come back if their content changes.";
       ignoreBtn.onclick = () => void this.ignoreSelected();
     }
+  }
+  /** The whole-dataset actions, one click removed from the everyday button. */
+  showSyncMenu(event) {
+    const menu = new import_obsidian6.Menu();
+    menu.addItem(
+      (item) => item.setTitle("Mirror: make RAGFlow match my folders\u2026").setIcon("copy").onClick(() => void this.mirror())
+    );
+    menu.addItem(
+      (item) => item.setTitle("Force re-upload every file\u2026").setIcon("refresh-cw").onClick(() => void this.confirmForceSyncAll())
+    );
+    menu.showAtMouseEvent(event);
   }
   /**
    * The one sync button: ticked files if any are ticked, everything otherwise.

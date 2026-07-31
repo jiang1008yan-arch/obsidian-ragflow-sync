@@ -364,8 +364,11 @@ Selected `Up to date` files are re-uploaded as if modified; nothing else is
 touched, so you rebuild only the documents you choose instead of re-uploading
 the entire vault.
 
-To rebuild *everything* regardless of the diff result, run
-`RAGFlow Sync: Force re-sync all` from the command palette.
+To rebuild *everything* regardless of the diff result, open the `▾` menu on the
+sync button and choose `Force re-upload every file…`. It confirms first, with a
+count: RAGFlow re-parses every document it receives, so on a large vault this is
+a much bigger job than the button it sits next to. It is also available as
+`RAGFlow Sync: Force re-sync all` in the command palette.
 
 ### When The Document Counts Do Not Match
 
@@ -419,9 +422,9 @@ up to date on evidence it does not have.
 
 ### Mirroring A Folder Into RAGFlow
 
-A scan reports; `Mirror` acts. Run `RAGFlow Sync: Mirror vault to RAGFlow` from
-the command palette to make every mapped dataset match its source folder
-exactly, in one step:
+A scan reports; `Mirror` acts. Click the `▾` caret on the sync button and choose
+`Mirror: make RAGFlow match my folders…` to make every mapped dataset match its
+source folder exactly, in one step:
 
 - a document the folder does not account for is **deleted**;
 - a file the dataset does not hold is **uploaded**;
@@ -452,9 +455,11 @@ Two warnings worth reading before you confirm:
 - **Snoozed files are included.** Ignoring a file says "leave this one alone",
   which cannot survive an instruction to make the dataset match the folder.
 
-It is kept off the panel toolbar on purpose: it deletes in bulk and is needed
-only occasionally, so it should not sit one click away from the everyday
-buttons.
+It sits in the sync button's menu rather than on the toolbar itself: it belongs
+next to Sync because it is a variation on it, but it deletes in bulk, so the
+extra click keeps it clear of a mis-aimed click on the everyday button. It is
+also available as `RAGFlow Sync: Mirror vault to RAGFlow` in the command
+palette.
 
 ### Ignoring Files
 

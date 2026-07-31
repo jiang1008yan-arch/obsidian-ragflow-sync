@@ -4,7 +4,7 @@ An Obsidian plugin that one-way syncs vault files into RAGFlow datasets (knowled
 
 The panel has two tabs over a single scan, and three controls. **Changes** is a vault-folder tree showing only the actionable states — New / Modified / Deleted / Missing — each as a right-side badge, above the documents found only in RAGFlow. Up-to-date and ignored files are not listed. **All files** is the same folder tree over every in-scope file (including up-to-date ones), with no badges, for forcing a re-upload; it loads its list on first visit.
 
-The controls are "Scan", one sync button whose label follows the selection ("Sync all (N)" with nothing ticked, "Sync selected (N)" otherwise), and "Ignore selected", which appears only when something is ticked. Mirror is not on the toolbar: it deletes in bulk and is rarely needed, so it lives in the command palette.
+The controls are "Scan", one sync button whose label follows the selection ("Sync all (N)" with nothing ticked, "Sync selected (N)" otherwise), and "Ignore selected", which appears only when something is ticked. A caret on the sync button opens the whole-dataset actions — **Mirror** and force re-upload — which sit there rather than in toolbar slots of their own: they are variations on Sync, but both rewrite far more than it does, so the extra click guards against a mis-aimed one. Both confirm before running.
 
 ## Language
 

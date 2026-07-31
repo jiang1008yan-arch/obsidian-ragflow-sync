@@ -1,4 +1,4 @@
-import { App, ItemView, Modal, Notice, WorkspaceLeaf } from "obsidian";
+import { App, ItemView, Menu, Modal, Notice, WorkspaceLeaf } from "obsidian";
 import type RagflowSyncPlugin from "./main";
 import {
 	ChangeKind,
@@ -31,23 +31,33 @@ import {
 export const VIEW_TYPE_RAGFLOW_SYNC = "ragflow-sync-view";
 
 /**
- * Confirmation for a Mirror, which is the one action that deletes documents
- * without the user having picked them one by one. Resolves true only if the
- * confirm button is pressed; dismissing the modal any other way cancels.
+ * Confirmation for the menu actions, which rewrite whole datasets rather than
+ * the files the user picked. Runs the callback only if the confirm button is
+ * pressed; dismissing the modal any other way cancels.
  */
-class MirrorConfirmModal extends Modal {
+class ConfirmModal extends Modal {
+	private title: string;
 	private lines: string[];
+	private confirmLabel: string;
 	private onConfirm: () => void;
 	private confirmed = false;
 
-	constructor(app: App, lines: string[], onConfirm: () => void) {
+	constructor(
+		app: App,
+		title: string,
+		lines: string[],
+		confirmLabel: string,
+		onConfirm: () => void
+	) {
 		super(app);
+		this.title = title;
 		this.lines = lines;
+		this.confirmLabel = confirmLabel;
 		this.onConfirm = onConfirm;
 	}
 
 	onOpen(): void {
-		this.titleEl.setText("Mirror vault to RAGFlow");
+		this.titleEl.setText(this.title);
 		for (const line of this.lines) {
 			this.contentEl.createEl("p", { text: line });
 		}
@@ -56,7 +66,7 @@ class MirrorConfirmModal extends Modal {
 		const cancel = buttons.createEl("button", { text: "Cancel" });
 		cancel.onclick = () => this.close();
 
-		const confirm = buttons.createEl("button", { text: "Mirror" });
+		const confirm = buttons.createEl("button", { text: this.confirmLabel });
 		confirm.addClass("mod-warning");
 		confirm.onclick = () => {
 			this.confirmed = true;
@@ -282,7 +292,39 @@ export class RagflowSyncView extends ItemView {
 			"Deletions cannot be undone. Snoozed (ignored) files are included: a " +
 				"mirror makes RAGFlow match your vault exactly.",
 		];
-		new MirrorConfirmModal(this.app, lines, () => void this.runMirror(plan)).open();
+		new ConfirmModal(
+			this.app,
+			"Mirror vault to RAGFlow",
+			lines,
+			"Mirror",
+			() => void this.runMirror(plan)
+		).open();
+	}
+
+	/**
+	 * Force re-upload, behind a confirmation: it re-sends every in-scope file
+	 * regardless of the diff, and each upload is re-parsed by RAGFlow, so on a
+	 * large vault it is a much bigger job than the button it sits next to.
+	 */
+	private confirmForceSyncAll(): void {
+		if (this.busy) return;
+		const total = this.changes.filter((c) => !c.ignored).length;
+		if (total === 0) {
+			new Notice("Nothing to re-upload. Run a scan first.");
+			return;
+		}
+		new ConfirmModal(
+			this.app,
+			"Force re-upload every file",
+			[
+				`Re-upload all ${total} in-scope file(s), including the ones already ` +
+					`up to date.`,
+				"RAGFlow re-parses everything that is uploaded, so this can take a " +
+					"long time on a large vault. Snoozed (ignored) files are skipped.",
+			],
+			"Re-upload all",
+			() => void this.forceSyncAll()
+		).open();
 	}
 
 	/** Execute a confirmed Mirror plan: uploads and record-clearing deletes first, then orphans. */
@@ -518,9 +560,13 @@ export class RagflowSyncView extends ItemView {
 	/**
 	 * Three controls, not six. One scan covers both halves of the comparison, one
 	 * sync button follows the selection instead of pairing "all" with "selected",
-	 * and "Ignore" only appears once there is a selection to ignore. Mirror is a
-	 * rare recovery action that deletes in bulk, so it lives in the command
-	 * palette rather than one click away from the everyday buttons.
+	 * and "Ignore" only appears once there is a selection to ignore.
+	 *
+	 * The rarer whole-dataset actions hang off the sync button in a menu rather
+	 * than taking toolbar slots of their own. They belong next to Sync because
+	 * that is what they are variations on, but both rewrite far more than the
+	 * everyday button does — Mirror deletes in bulk — so a click on the caret
+	 * stands between them and a mis-aimed click on Sync.
 	 */
 	private renderToolbar(toolbar: HTMLElement): void {
 		if (this.activeTab === "diff") {
@@ -531,9 +577,15 @@ export class RagflowSyncView extends ItemView {
 			scanBtn.onclick = () => void this.scan();
 		}
 
-		this.syncBtn = toolbar.createEl("button", { text: "Sync" });
+		const group = toolbar.createDiv({ cls: "ragflow-sync-split" });
+		this.syncBtn = group.createEl("button", { text: "Sync" });
 		this.syncBtn.addClass("mod-cta");
 		this.syncBtn.onclick = () => void this.syncFromToolbar();
+
+		const moreBtn = group.createEl("button", { text: "▾" });
+		moreBtn.addClass("ragflow-sync-more");
+		moreBtn.title = "Other sync actions";
+		moreBtn.onclick = (event) => this.showSyncMenu(event);
 
 		// Only meaningful with a selection, so it stays out of the way until then.
 		if (this.activeTab === "diff" && this.selected.size > 0) {
@@ -545,6 +597,26 @@ export class RagflowSyncView extends ItemView {
 				"already in RAGFlow. They come back if their content changes.";
 			ignoreBtn.onclick = () => void this.ignoreSelected();
 		}
+	}
+
+	/** The whole-dataset actions, one click removed from the everyday button. */
+	private showSyncMenu(event: MouseEvent): void {
+		const menu = new Menu();
+
+		menu.addItem((item) =>
+			item
+				.setTitle("Mirror: make RAGFlow match my folders…")
+				.setIcon("copy")
+				.onClick(() => void this.mirror())
+		);
+		menu.addItem((item) =>
+			item
+				.setTitle("Force re-upload every file…")
+				.setIcon("refresh-cw")
+				.onClick(() => void this.confirmForceSyncAll())
+		);
+
+		menu.showAtMouseEvent(event);
 	}
 
 	/**
