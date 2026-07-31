@@ -98,14 +98,14 @@ describe("classifyByStat", () => {
 		expect(r.news).toHaveLength(0);
 	});
 
-	it("attributes a file to the first owning mapping (dedup)", () => {
+	it("attributes a file to exactly one mapping, the most specific (dedup)", () => {
 		const r = classifyByStat(
 			[entry("Notes/Sub/a.md")],
 			state({}),
 			scope({ mappings: [mapping("Notes"), mapping("Notes/Sub")] })
 		);
 		expect(r.news).toHaveLength(1);
-		expect(r.news[0].mapping.vaultPath).toBe("Notes");
+		expect(r.news[0].mapping.vaultPath).toBe("Notes/Sub");
 	});
 
 	describe("processing-version reprocess rule", () => {

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { TFile } from "obsidian";
-import type { RagflowClient } from "./ragflowClient";
+import { RagflowError, type RagflowClient } from "./ragflowClient";
 import { applySyncRun } from "./syncApplyRun";
 import { SyncStateStore } from "./syncState";
 import type { VaultAccess, VaultFile } from "./vaultAccess";
@@ -80,13 +80,13 @@ describe("applySyncRun deletion", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("drops the local record even when the remote document is already gone", async () => {
+	it("drops the local record when the remote document is already gone", async () => {
 		const s = settings({ state: { files: { [ENTITY_PATH]: record() } } });
 		const store = new SyncStateStore(s.state, async () => {});
 		const client = {
 			deleteDocuments: vi
 				.fn()
-				.mockRejectedValue(new Error("RAGFlow error (404): not found")),
+				.mockRejectedValue(new RagflowError("RAGFlow error (404): not found", 404)),
 			parseDocuments: vi.fn(),
 		} as unknown as RagflowClient;
 		const change: FileChange = {
@@ -107,6 +107,37 @@ describe("applySyncRun deletion", () => {
 		expect(store.getFile(ENTITY_PATH)).toBeUndefined();
 		expect(result.ok).toBe(1);
 		expect(result.failed).toBe(0);
+	});
+
+	it("keeps the record when the delete genuinely failed, so it is retried", async () => {
+		// Dropping it here would leave the document in RAGFlow with nothing
+		// tracking it — an orphan only a reconcile could ever find again.
+		const s = settings({ state: { files: { [ENTITY_PATH]: record() } } });
+		const store = new SyncStateStore(s.state, async () => {});
+		const client = {
+			deleteDocuments: vi
+				.fn()
+				.mockRejectedValue(new RagflowError("RAGFlow error (500): boom", 500)),
+			parseDocuments: vi.fn(),
+		} as unknown as RagflowClient;
+		const change: FileChange = {
+			kind: "deleted",
+			vaultPath: ENTITY_PATH,
+			record: record(),
+		};
+
+		const result = await applySyncRun({
+			vault: emptyVault(),
+			client,
+			store,
+			settings: s,
+			changes: [change],
+		});
+
+		expect(store.getFile(ENTITY_PATH)).toBeDefined();
+		expect(result.ok).toBe(0);
+		expect(result.failed).toBe(1);
+		expect(result.errors[0]).toContain("boom");
 	});
 });
 

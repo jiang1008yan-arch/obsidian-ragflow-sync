@@ -19,15 +19,33 @@ export function prefixOf(mapping: DatasetMapping): string {
 	return mapping.vaultPath ? `${mapping.vaultPath}/` : "";
 }
 
-/** The first mapping whose prefix owns this vault path, if any. */
+/**
+ * The mapping that owns this vault path: the one with the **longest** matching
+ * folder prefix, so a nested mapping wins over the broader one containing it.
+ *
+ * Order in the settings list deliberately does not decide. Picking the first
+ * match instead would mean `Notes -> main` silently swallows every file under a
+ * later `Notes/Research -> research`, with nothing in the UI to explain why the
+ * more specific mapping never took effect. Whole-vault mappings (empty
+ * vaultPath) are the shortest prefix of all, so they only catch what no real
+ * folder mapping claims. Ties are impossible: two mappings with the same
+ * vaultPath have the same prefix length, and the first of those still wins.
+ */
 export function owningMapping(
 	vaultPath: string,
 	scope: ScopeConfig
 ): DatasetMapping | undefined {
-	return scope.mappings.find((m) => {
-		const prefix = prefixOf(m);
-		return prefix === "" ? true : vaultPath.startsWith(prefix);
-	});
+	let best: DatasetMapping | undefined;
+	let bestLength = -1;
+	for (const mapping of scope.mappings) {
+		const prefix = prefixOf(mapping);
+		if (prefix !== "" && !vaultPath.startsWith(prefix)) continue;
+		if (prefix.length > bestLength) {
+			best = mapping;
+			bestLength = prefix.length;
+		}
+	}
+	return best;
 }
 
 /** A vault file is in-scope if owned by a mapping, allowed by extension, and not excluded. */

@@ -40,8 +40,10 @@ describe("isDuplicateName", () => {
 		expect(isDuplicateName("axb.md", "a.b.md")).toBe(false);
 	});
 
-	it("accepted (B) risk: a numeric-paren real name collides with its base", () => {
-		// Uploading report.md intentionally also clears report(2024).md.
+	it("matches a numeric-paren real name, which callers must then protect", () => {
+		// This predicate alone cannot tell a "(2024)" document apart from a "(1)"
+		// leftover; DocumentIndex is what keeps a real report(2024).md from being
+		// deleted (see documentIndex.test.ts).
 		expect(isDuplicateName("report(2024).md", "report.md")).toBe(true);
 	});
 

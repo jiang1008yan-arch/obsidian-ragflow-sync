@@ -375,6 +375,16 @@ function isDuplicateName(candidate, baseName3) {
   const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return new RegExp(`^${esc(stem)}(\\(\\d+\\))?${esc(ext)}$`).test(candidate);
 }
+var RagflowError = class extends Error {
+  constructor(message, status) {
+    super(message);
+    this.name = "RagflowError";
+    this.status = status;
+  }
+};
+function isNotFound(error) {
+  return error instanceof RagflowError && error.status === 404;
+}
 var RagflowClient = class {
   constructor(getSettings) {
     /** All datasets, listed once per client lifetime. */
@@ -413,10 +423,14 @@ var RagflowClient = class {
     }
     if (resp.status < 200 || resp.status >= 300) {
       const msg = payload?.message ?? resp.text ?? `HTTP ${resp.status}`;
-      throw new Error(`RAGFlow error (${resp.status}): ${msg}`);
+      throw new RagflowError(`RAGFlow error (${resp.status}): ${msg}`, resp.status);
     }
     if (payload && payload.code !== void 0 && payload.code !== 0) {
-      throw new Error(`RAGFlow error: ${payload.message ?? "unknown error"}`);
+      const msg = payload.message ?? "unknown error";
+      throw new RagflowError(
+        `RAGFlow error: ${msg}`,
+        /not\s*found|does\s*not\s*exist/i.test(msg) ? 404 : void 0
+      );
     }
     return payload?.data ?? payload;
   }
@@ -550,39 +564,6 @@ var RagflowClient = class {
     return all;
   }
   /**
-   * Ids of documents in a dataset whose name collides with `name` — the name
-   * itself plus any RAGFlow "(n)" duplicate of it (see isDuplicateName). Used to
-   * clear existing copies before a re-upload so the new file replaces them
-   * instead of being auto-suffixed. Narrowed server-side by keyword on the stem,
-   * then matched exactly client-side; paginates fully.
-   */
-  async findDuplicateDocumentIds(datasetId, name) {
-    const dot = name.lastIndexOf(".");
-    const stem = dot > 0 ? name.slice(0, dot) : name;
-    const ids = [];
-    let page = 1;
-    while (true) {
-      const data = await this.send({
-        url: `${this.base()}/datasets/${datasetId}/documents${this.query({
-          keywords: stem,
-          page,
-          page_size: PAGE_SIZE
-        })}`,
-        method: "GET",
-        headers: this.headers()
-      });
-      const docs = data?.docs ?? [];
-      for (const d of docs) {
-        if (d.id && isDuplicateName(d.name, name))
-          ids.push(d.id);
-      }
-      if (docs.length < PAGE_SIZE)
-        break;
-      page += 1;
-    }
-    return ids;
-  }
-  /**
    * Upload one document into a dataset. RAGFlow returns the created document(s);
    * the first one's id is what we track and later attach metadata to.
    */
@@ -697,10 +678,18 @@ function prefixOf(mapping) {
   return mapping.vaultPath ? `${mapping.vaultPath}/` : "";
 }
 function owningMapping(vaultPath, scope) {
-  return scope.mappings.find((m) => {
-    const prefix = prefixOf(m);
-    return prefix === "" ? true : vaultPath.startsWith(prefix);
-  });
+  let best;
+  let bestLength = -1;
+  for (const mapping of scope.mappings) {
+    const prefix = prefixOf(mapping);
+    if (prefix !== "" && !vaultPath.startsWith(prefix))
+      continue;
+    if (prefix.length > bestLength) {
+      best = mapping;
+      bestLength = prefix.length;
+    }
+  }
+  return best;
 }
 function isInScope(vaultPath, scope) {
   if (!scope.extensions.includes(extensionOf(vaultPath)))
@@ -1028,6 +1017,78 @@ function mergeMirrorPlans(plans) {
 
 // src/syncApplyRun.ts
 var import_obsidian4 = require("obsidian");
+
+// src/documentIndex.ts
+var DocumentIndex = class {
+  constructor(client) {
+    /** datasetId -> (document name -> ids). Absent until that dataset is listed. */
+    this.byDataset = /* @__PURE__ */ new Map();
+    this.client = client;
+  }
+  async names(datasetId) {
+    const cached = this.byDataset.get(datasetId);
+    if (cached)
+      return cached;
+    const index = /* @__PURE__ */ new Map();
+    for (const doc of await this.client.listDocuments(datasetId)) {
+      if (!doc.id)
+        continue;
+      const ids = index.get(doc.name);
+      if (ids)
+        ids.push(doc.id);
+      else
+        index.set(doc.name, [doc.id]);
+    }
+    this.byDataset.set(datasetId, index);
+    return index;
+  }
+  /**
+   * Ids to remove before uploading `name`: the name itself plus RAGFlow's
+   * "name(n).ext" variants of it.
+   *
+   * `protectedNames` are the filenames the vault actually holds for this
+   * dataset. A variant that is itself a real file — `report(2024).md` next to
+   * `report.md` — is a different document, not a duplicate, and deleting it
+   * would silently destroy it. Only the exact name being uploaded is removed
+   * despite being protected, since that is the one being replaced.
+   */
+  async duplicateIds(datasetId, name, protectedNames) {
+    const index = await this.names(datasetId);
+    const ids = [];
+    for (const [candidate, candidateIds] of index) {
+      if (!isDuplicateName(candidate, name))
+        continue;
+      if (candidate !== name && protectedNames.has(candidate))
+        continue;
+      ids.push(...candidateIds);
+    }
+    return ids;
+  }
+  /** Note a freshly uploaded document so later collisions see it. */
+  record(datasetId, name, id) {
+    const index = this.byDataset.get(datasetId);
+    if (!index)
+      return;
+    const ids = index.get(name);
+    if (ids)
+      ids.push(id);
+    else
+      index.set(name, [id]);
+  }
+  /** Drop deleted documents so they are not offered for deletion twice. */
+  forget(datasetId, deleted) {
+    const index = this.byDataset.get(datasetId);
+    if (!index)
+      return;
+    for (const [name, ids] of index) {
+      const kept = ids.filter((id) => !deleted.has(id));
+      if (kept.length === 0)
+        index.delete(name);
+      else if (kept.length !== ids.length)
+        index.set(name, kept);
+    }
+  }
+};
 
 // src/internalize.ts
 var IMAGE_EXT = /\.(png|jpe?g|gif|svg|webp|bmp)$/i;
@@ -1375,12 +1436,31 @@ var CONTENT_TYPES = {
   gif: "image/gif"
 };
 var FLUSH_EVERY = 25;
+var EMPTY_NAMES = /* @__PURE__ */ new Set();
+var UPLOAD_CONCURRENCY = 4;
+async function runPool(items, limit, worker) {
+  let next = 0;
+  const runners = Array.from(
+    { length: Math.min(limit, items.length) },
+    async () => {
+      while (true) {
+        const index = next++;
+        if (index >= items.length)
+          return;
+        await worker(items[index]);
+      }
+    }
+  );
+  await Promise.all(runners);
+}
 async function applySyncRun(input) {
   const run = new SyncApplyRun(input);
   return run.apply();
 }
 var SyncApplyRun = class {
   constructor(input) {
+    /** dataset name -> vault filenames under it, built on first use. */
+    this.protectedNames = /* @__PURE__ */ new Map();
     this.vault = input.vault;
     this.client = input.client;
     this.store = input.store;
@@ -1388,46 +1468,47 @@ var SyncApplyRun = class {
     this.changes = input.changes;
     this.onProgress = input.onProgress;
     this.processingVersion = input.processingVersion ?? PROCESSING_VERSION;
+    this.index = new DocumentIndex(input.client);
   }
   async apply() {
     const actionable = this.changes.filter((c) => c.kind !== "unchanged");
+    const uploads = actionable.filter((c) => c.kind !== "deleted");
+    const deletions = actionable.filter((c) => c.kind === "deleted");
     let done = 0;
     const result = { ok: 0, failed: 0, errors: [], parsed: 0 };
     const uploaded = /* @__PURE__ */ new Map();
     const companionIndex = await buildCompanionIndex(this.settings, this.vault);
     let sinceFlush = 0;
-    try {
-      for (const change of actionable) {
-        try {
-          if (change.kind === "new" || change.kind === "missing") {
-            const up = await this.syncUpload(change, void 0, companionIndex);
-            this.recordUpload(uploaded, up);
-            if (up.error)
-              throw up.error;
-          } else if (change.kind === "modified") {
-            const up = await this.syncUpload(
-              change,
-              change.record,
-              companionIndex
-            );
-            this.recordUpload(uploaded, up);
-            if (up.error)
-              throw up.error;
-          } else if (change.kind === "deleted") {
-            await this.syncDelete(change);
-          }
-          result.ok += 1;
-        } catch (e) {
-          result.failed += 1;
-          result.errors.push(`${change.vaultPath}: ${e.message}`);
+    const step = async (change) => {
+      try {
+        if (change.kind === "new" || change.kind === "missing") {
+          const up = await this.syncUpload(change, void 0, companionIndex);
+          this.recordUpload(uploaded, up);
+          if (up.error)
+            throw up.error;
+        } else if (change.kind === "modified") {
+          const up = await this.syncUpload(change, change.record, companionIndex);
+          this.recordUpload(uploaded, up);
+          if (up.error)
+            throw up.error;
+        } else if (change.kind === "deleted") {
+          await this.syncDelete(change);
         }
-        done += 1;
-        if (++sinceFlush >= FLUSH_EVERY) {
-          await this.store.flush();
-          sinceFlush = 0;
-        }
-        this.onProgress?.(done, actionable.length, change.vaultPath);
+        result.ok += 1;
+      } catch (e) {
+        result.failed += 1;
+        result.errors.push(`${change.vaultPath}: ${e.message}`);
       }
+      done += 1;
+      if (++sinceFlush >= FLUSH_EVERY) {
+        sinceFlush = 0;
+        await this.store.flush();
+      }
+      this.onProgress?.(done, actionable.length, change.vaultPath);
+    };
+    try {
+      await runPool(uploads, UPLOAD_CONCURRENCY, step);
+      await runPool(deletions, UPLOAD_CONCURRENCY, step);
     } finally {
       await this.store.flush();
     }
@@ -1443,9 +1524,8 @@ var SyncApplyRun = class {
           change.record.documentId
         ]);
       } catch (e) {
-        console.warn(
-          `RAGFlow Sync: delete of ${change.vaultPath} failed (treating as already gone): ${e.message}`
-        );
+        if (!isNotFound(e))
+          throw e;
       }
     }
     this.store.deleteFile(change.vaultPath);
@@ -1486,7 +1566,11 @@ var SyncApplyRun = class {
       } catch (_e) {
       }
     }
-    await this.clearDuplicateDocuments(datasetId, file.name);
+    await this.clearDuplicateDocuments(
+      datasetId,
+      file.name,
+      change.mapping?.datasetName
+    );
     const prepared = file.extension.toLowerCase() === "md" ? this.prepareMarkdown(bytes, file.path) : { uploadBytes: bytes, meta: {} };
     const uploadBytes = prepared.uploadBytes;
     let meta = prepared.meta;
@@ -1508,6 +1592,7 @@ var SyncApplyRun = class {
       uploadBytes,
       contentType
     );
+    this.index.record(datasetId, file.name, doc.id);
     let metaError = null;
     if (Object.keys(meta).length > 0) {
       metaError = await this.setDocumentMetadataBestEffort(
@@ -1580,11 +1665,40 @@ var SyncApplyRun = class {
       return batchError;
     }
   }
-  async clearDuplicateDocuments(datasetId, name) {
+  /**
+   * Filenames the vault holds for a dataset. A document whose name is one of
+   * these is a real file's document, never a duplicate to sweep up.
+   */
+  protectedNamesFor(datasetName) {
+    if (!datasetName)
+      return EMPTY_NAMES;
+    const cached = this.protectedNames.get(datasetName);
+    if (cached)
+      return cached;
+    const names = /* @__PURE__ */ new Set();
+    for (const change of this.changes) {
+      if (change.kind === "deleted")
+        continue;
+      if (change.mapping?.datasetName !== datasetName)
+        continue;
+      const slash = change.vaultPath.lastIndexOf("/");
+      names.add(
+        slash < 0 ? change.vaultPath : change.vaultPath.slice(slash + 1)
+      );
+    }
+    this.protectedNames.set(datasetName, names);
+    return names;
+  }
+  async clearDuplicateDocuments(datasetId, name, datasetName) {
     try {
-      const dupes = await this.client.findDuplicateDocumentIds(datasetId, name);
+      const dupes = await this.index.duplicateIds(
+        datasetId,
+        name,
+        this.protectedNamesFor(datasetName)
+      );
       if (dupes.length > 0) {
         await this.client.deleteDocuments(datasetId, dupes);
+        this.index.forget(datasetId, new Set(dupes));
       }
     } catch (e) {
       console.warn(
